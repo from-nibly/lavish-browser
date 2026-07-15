@@ -1356,6 +1356,7 @@ dependencies = [
 name = "lavish-browser"
 version = "0.1.0"
 dependencies = [
+ "gtk4",
  "lavish-browser-control",
  "lavish-browser-core",
  "lavish-browser-protocol",

@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+gtk = { package = "gtk4", version = "0.11.4", features = ["v4_10"] }
 lavish-browser-core = { path = "../core" }
 lavish-browser-control = { path = "../control" }
 lavish-browser-protocol = { path = "../protocol" }
