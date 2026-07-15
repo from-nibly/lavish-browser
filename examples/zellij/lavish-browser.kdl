@@ -1,0 +1,11 @@
+// Build with: cargo build -p lavish-browser-zellij --release --target wasm32-wasip1
+// Replace the two absolute paths below with the installed WASM and helper paths.
+layout {
+    pane
+    pane size=1 borderless=true {
+        plugin location="file:/absolute/path/to/lavish_browser_zellij.wasm" {
+            helper_path "/absolute/path/to/lavish-browser-ctl"
+            debug "false"
+        }
+    }
+}
