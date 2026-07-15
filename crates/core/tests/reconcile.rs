@@ -228,6 +228,26 @@ fn listed_but_exited_or_raced_session_is_treated_as_not_live() {
         .unwrap();
 
     assert!(!state.contains("exited", 1));
+    assert!(!state.is_unresolved("exited"));
+}
+
+#[test]
+fn transient_session_query_failure_preserves_projects_as_unresolved() {
+    let runner = FakeRunner {
+        outputs: Mutex::new(VecDeque::from([
+            success("main\n"),
+            failure("Session 'main' configuration not found"),
+        ])),
+        calls: Mutex::new(Vec::new()),
+    };
+    let source = ZellijCommandState::new(runner);
+    let mut model = BrowserModel::default();
+    add(&mut model, zellij("main", 7), "/keep", 1);
+
+    reconcile_from_source(&mut model, &source).unwrap();
+
+    assert_eq!(model.projects.len(), 1);
+    assert_eq!(model.projects[0].key, zellij("main", 7));
 }
 
 #[test]

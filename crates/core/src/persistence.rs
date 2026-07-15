@@ -1,6 +1,7 @@
 use crate::{
     BrowserModel, BrowserStateStore, Document, DocumentKey, DocumentLifecycle, Project, ProjectKey,
 };
+use lavish_browser_protocol::validate_session_url;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -8,6 +9,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 const APPLICATION_DIRECTORY: &str = "lavish-browser";
@@ -48,6 +50,7 @@ impl From<io::Error> for PersistenceError {
 pub enum LoadIssue {
     Corrupt(String),
     UnknownSchemaVersion(u64),
+    InvalidSessionUrls { rejected: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,9 +119,12 @@ impl MetadataStore {
             Ok(state) => state,
             Err(error) => return Ok(empty_report(LoadIssue::Corrupt(error.to_string()))),
         };
+        let (model, rejected_urls) = state.into_model();
         Ok(LoadReport {
-            model: state.into_model(),
-            issue: None,
+            model,
+            issue: (rejected_urls > 0).then_some(LoadIssue::InvalidSessionUrls {
+                rejected: rejected_urls,
+            }),
         })
     }
 
@@ -169,15 +175,39 @@ impl BrowserStateStore for MetadataStore {
 
 pub struct CoalescingStateStore<S> {
     inner: S,
-    last_saved: Mutex<Option<BrowserModel>>,
+    coalescing_window: Duration,
+    pending: Mutex<Option<PendingSave>>,
+}
+
+struct PendingSave {
+    model: BrowserModel,
+    due_at: Duration,
 }
 
 impl<S> CoalescingStateStore<S> {
-    pub fn new(inner: S) -> Self {
+    pub fn new(inner: S, coalescing_window: Duration) -> Self {
         Self {
             inner,
-            last_saved: Mutex::new(None),
+            coalescing_window,
+            pending: Mutex::new(None),
         }
+    }
+
+    /// Queues an accepted model mutation using a caller-provided monotonic timestamp.
+    /// Each mutation restarts the debounce window, so a burst produces one final write.
+    pub fn queue_save(&self, model: &BrowserModel, now: Duration) {
+        let due_at = now.saturating_add(self.coalescing_window);
+        *self.pending.lock().expect("state store lock poisoned") = Some(PendingSave {
+            model: model.clone(),
+            due_at,
+        });
+    }
+
+    pub fn has_pending_save(&self) -> bool {
+        self.pending
+            .lock()
+            .expect("state store lock poisoned")
+            .is_some()
     }
 
     pub fn into_inner(self) -> S {
@@ -185,23 +215,35 @@ impl<S> CoalescingStateStore<S> {
     }
 }
 
-impl<S: BrowserStateStore> BrowserStateStore for CoalescingStateStore<S> {
-    type Error = S::Error;
-
-    fn save(&self, model: &BrowserModel) -> Result<(), Self::Error> {
-        let mut last_saved = self.last_saved.lock().expect("state store lock poisoned");
-        if last_saved.as_ref() == Some(model) {
-            return Ok(());
+impl<S: BrowserStateStore> CoalescingStateStore<S> {
+    /// Writes the final queued state only when its coalescing deadline has elapsed.
+    /// Returns whether a write occurred. Failed writes remain queued for retry.
+    pub fn flush_due(&self, now: Duration) -> Result<bool, S::Error> {
+        let mut pending = self.pending.lock().expect("state store lock poisoned");
+        let Some(save) = pending.as_ref() else {
+            return Ok(false);
+        };
+        if now < save.due_at {
+            return Ok(false);
         }
-        self.inner.save(model)?;
-        *last_saved = Some(model.clone());
-        Ok(())
+        self.inner.save(&save.model)?;
+        *pending = None;
+        Ok(true)
     }
 
-    fn load(&self) -> Result<BrowserModel, Self::Error> {
-        let model = self.inner.load()?;
-        *self.last_saved.lock().expect("state store lock poisoned") = Some(model.clone());
-        Ok(model)
+    /// Forces the latest queued state to disk, for orderly shutdown.
+    pub fn flush(&self) -> Result<bool, S::Error> {
+        let mut pending = self.pending.lock().expect("state store lock poisoned");
+        let Some(save) = pending.as_ref() else {
+            return Ok(false);
+        };
+        self.inner.save(&save.model)?;
+        *pending = None;
+        Ok(true)
+    }
+
+    pub fn load(&self) -> Result<BrowserModel, S::Error> {
+        self.inner.load()
     }
 }
 
@@ -268,8 +310,9 @@ impl PersistedState {
         }
     }
 
-    fn into_model(self) -> BrowserModel {
+    fn into_model(self) -> (BrowserModel, usize) {
         let mut projects = Vec::with_capacity(self.projects.len());
+        let mut rejected_urls = 0;
         for persisted in self.projects {
             if projects
                 .iter()
@@ -279,6 +322,10 @@ impl PersistedState {
             }
             let mut documents = Vec::with_capacity(persisted.documents.len());
             for document in persisted.documents {
+                if validate_session_url(&document.lavish_url).is_err() {
+                    rejected_urls += 1;
+                    continue;
+                }
                 if documents.iter().any(|existing: &Document| {
                     existing.key.canonical_source_file == document.canonical_source_file
                 }) {
@@ -314,10 +361,13 @@ impl PersistedState {
         let selected_project = self
             .selected_project
             .filter(|selected| projects.iter().any(|project| project.key == *selected));
-        BrowserModel {
-            projects,
-            selected_project,
-        }
+        (
+            BrowserModel {
+                projects,
+                selected_project,
+            },
+            rejected_urls,
+        )
     }
 }
 

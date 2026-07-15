@@ -8,6 +8,7 @@ use std::process::Command;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LiveZellijState {
     tabs_by_session: HashMap<String, HashSet<u32>>,
+    unresolved_sessions: HashSet<String>,
 }
 
 impl LiveZellijState {
@@ -24,6 +25,14 @@ impl LiveZellijState {
         self.tabs_by_session
             .get(session_name)
             .is_some_and(|tabs| tabs.contains(&stable_tab_id))
+    }
+
+    pub fn mark_unresolved(&mut self, session_name: impl Into<String>) {
+        self.unresolved_sessions.insert(session_name.into());
+    }
+
+    pub fn is_unresolved(&self, session_name: &str) -> bool {
+        self.unresolved_sessions.contains(session_name)
     }
 }
 
@@ -144,7 +153,7 @@ impl<R> ZellijCommandState<R> {
         String::from_utf8(output.stdout).map_err(|_| ReconcileError::InvalidUtf8 { arguments })
     }
 
-    fn run_if_live(&self, arguments: Vec<String>) -> Result<Option<String>, ReconcileError>
+    fn query_tabs(&self, arguments: Vec<String>) -> Result<TabQueryResult, ReconcileError>
     where
         R: CommandRunner,
     {
@@ -153,12 +162,37 @@ impl<R> ZellijCommandState<R> {
             .run("zellij", &arguments)
             .map_err(ReconcileError::Command)?;
         if !output.success {
-            return Ok(None);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Ok(if is_authoritative_missing_session(&stderr) {
+                TabQueryResult::Missing
+            } else {
+                TabQueryResult::Unresolved
+            });
         }
         String::from_utf8(output.stdout)
-            .map(Some)
+            .map(TabQueryResult::Live)
             .map_err(|_| ReconcileError::InvalidUtf8 { arguments })
     }
+}
+
+fn is_authoritative_missing_session(stderr: &str) -> bool {
+    let Some(first_line) = stderr.lines().next() else {
+        return false;
+    };
+    let first_line = first_line.trim().to_ascii_lowercase();
+    let Some(after_prefix) = first_line.strip_prefix("session '") else {
+        return false;
+    };
+    let Some((_, after_name)) = after_prefix.split_once('\'') else {
+        return false;
+    };
+    after_name.trim_start().starts_with("not found")
+}
+
+enum TabQueryResult {
+    Live(String),
+    Missing,
+    Unresolved,
 }
 
 impl<R: CommandRunner> ZellijStateSource for ZellijCommandState<R> {
@@ -184,17 +218,23 @@ impl<R: CommandRunner> ZellijStateSource for ZellijCommandState<R> {
             if !active_sessions.contains(session_name.as_str()) {
                 continue;
             }
-            let Some(tab_output) = self.run_if_live(vec![
+            let tab_output = match self.query_tabs(vec![
                 "--session".into(),
                 session_name.clone(),
                 "action".into(),
                 "list-tabs".into(),
                 "--json".into(),
-            ])?
-            else {
-                // Sessions can disappear between the list and tab queries. Some Zellij
-                // versions also include resumable exited sessions in the short list.
-                continue;
+            ])? {
+                TabQueryResult::Live(output) => output,
+                // Sessions can disappear between list and tab queries. Some Zellij versions
+                // also include resumable exited sessions in the short listing.
+                TabQueryResult::Missing => continue,
+                // Permissions, configuration, and other transient failures are not evidence
+                // that an identity is stale, so preserve it for a later reconciliation.
+                TabQueryResult::Unresolved => {
+                    state.mark_unresolved(session_name.clone());
+                    continue;
+                }
             };
             let tabs: Vec<TabRecord> = serde_json::from_str(&tab_output).map_err(|error| {
                 ReconcileError::InvalidTabJson {
@@ -219,7 +259,7 @@ pub fn reconcile_model(model: &mut BrowserModel, live: &LiveZellijState) {
         ProjectKey::Zellij {
             session_name,
             stable_tab_id,
-        } => live.contains(session_name, *stable_tab_id),
+        } => live.is_unresolved(session_name) || live.contains(session_name, *stable_tab_id),
     });
 
     for project in &mut model.projects {

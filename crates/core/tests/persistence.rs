@@ -5,10 +5,11 @@ use lavish_browser_core::{
     BrowserModel, BrowserStateStore, DocumentKey, DocumentLifecycle, ProjectKey,
 };
 use lavish_browser_protocol::ProjectMetadata;
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -190,6 +191,57 @@ fn corrupt_and_unknown_schema_files_are_preserved_and_load_empty() {
 }
 
 #[test]
+fn untrusted_persisted_session_urls_are_rejected_and_reported() {
+    let temporary = TestDirectory::new();
+    let store = MetadataStore::new(&temporary.0);
+    store.save(&populated_model()).unwrap();
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.state_file()).unwrap()).unwrap();
+    let project = &mut state["projects"][0];
+    let documents = project["documents"].as_array_mut().unwrap();
+    for (source, url) in [
+        ("/tmp/remote.html", "https://example.com/session/x"),
+        (
+            "/tmp/credentials.html",
+            "http://user:secret@localhost/session/x",
+        ),
+        (
+            "/tmp/deceptive.html",
+            "http://localhost.evil.example/session/x",
+        ),
+        ("/tmp/malformed.html", "not a url"),
+        ("/tmp/path.html", "http://127.0.0.1/not-session/x"),
+    ] {
+        documents.push(serde_json::json!({
+            "canonical_source_file": source,
+            "lavish_url": url,
+            "title": null,
+            "last_activated_at": 50
+        }));
+    }
+    project["selected_document"] = serde_json::json!("/tmp/credentials.html");
+    fs::write(
+        store.state_file(),
+        serde_json::to_vec_pretty(&state).unwrap(),
+    )
+    .unwrap();
+
+    let report = store.load_with_report().unwrap();
+
+    assert_eq!(
+        report.issue,
+        Some(LoadIssue::InvalidSessionUrls { rejected: 5 })
+    );
+    let restored = &report.model.projects[0];
+    assert_eq!(restored.documents.len(), 1);
+    assert_eq!(
+        restored.documents[0].key.canonical_source_file,
+        "/tmp/report.html"
+    );
+    assert_eq!(restored.selected_document, None);
+}
+
+#[test]
 fn xdg_falls_back_to_home_and_missing_environment_is_reported() {
     let store = MetadataStore::from_environment(|name| {
         (name == "HOME").then(|| PathBuf::from("/home/example"))
@@ -203,14 +255,14 @@ fn xdg_falls_back_to_home_and_missing_environment_is_reported() {
 }
 
 struct CountingStore {
-    saves: Cell<usize>,
+    saves: RefCell<Vec<BrowserModel>>,
 }
 
 impl BrowserStateStore for CountingStore {
     type Error = ();
 
-    fn save(&self, _model: &BrowserModel) -> Result<(), Self::Error> {
-        self.saves.set(self.saves.get() + 1);
+    fn save(&self, model: &BrowserModel) -> Result<(), Self::Error> {
+        self.saves.borrow_mut().push(model.clone());
         Ok(())
     }
 
@@ -220,12 +272,30 @@ impl BrowserStateStore for CountingStore {
 }
 
 #[test]
-fn duplicate_pending_state_is_coalesced() {
-    let store = CoalescingStateStore::new(CountingStore {
-        saves: Cell::new(0),
-    });
-    let first = populated_model();
-    store.save(&first).unwrap();
-    store.save(&first).unwrap();
-    assert_eq!(store.into_inner().saves.get(), 1);
+fn distinct_burst_mutations_write_only_the_final_state_after_the_window() {
+    let store = CoalescingStateStore::new(
+        CountingStore {
+            saves: RefCell::new(Vec::new()),
+        },
+        Duration::from_millis(10),
+    );
+    let mut first = populated_model();
+    let mut second = first.clone();
+    second.projects[0].label = "second mutation".into();
+    let mut final_state = second.clone();
+    final_state.projects[0].label = "final mutation".into();
+
+    store.queue_save(&first, Duration::ZERO);
+    first.projects[0].label = "changed after queue".into();
+    store.queue_save(&second, Duration::from_millis(3));
+    store.queue_save(&final_state, Duration::from_millis(5));
+
+    assert!(!store.flush_due(Duration::from_millis(14)).unwrap());
+    assert!(store.has_pending_save());
+    assert!(store.flush_due(Duration::from_millis(15)).unwrap());
+    assert!(!store.has_pending_save());
+    assert!(!store.flush_due(Duration::from_millis(100)).unwrap());
+
+    let inner = store.into_inner();
+    assert_eq!(inner.saves.into_inner(), vec![final_state]);
 }
