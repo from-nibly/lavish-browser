@@ -6,6 +6,8 @@ publish.workspace = true
 
 [dependencies]
 gtk = { package = "gtk4", version = "0.11.4", features = ["v4_10"] }
+webkit6 = "0.6.1"
+url.workspace = true
 lavish-browser-core = { path = "../core" }
 lavish-browser-control = { path = "../control" }
 lavish-browser-protocol = { path = "../protocol" }

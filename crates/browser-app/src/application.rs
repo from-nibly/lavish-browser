@@ -1,3 +1,6 @@
+#[path = "webview/mod.rs"]
+mod webview;
+
 use gtk::glib;
 use gtk::prelude::*;
 use lavish_browser_control::{SocketServer, default_socket_path};
@@ -11,6 +14,7 @@ use lavish_browser_protocol::{
     ProjectSnapshot, RequestEnvelope, ResponseEnvelope, ResponseStatus,
 };
 use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::mpsc;
@@ -19,6 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const APPLICATION_ID: &str = "works.from-nibly.LavishBrowser";
 
 pub fn run() -> glib::ExitCode {
+    webview::configure_automation_from_environment();
     let app = gtk::Application::builder()
         .application_id(APPLICATION_ID)
         .build();
@@ -64,6 +69,7 @@ struct AppController {
     store: MetadataStore,
     rendering: Cell<bool>,
     presentation_count: Cell<u64>,
+    document_views: RefCell<HashMap<DocumentKey, Rc<webview::DocumentView>>>,
 }
 
 impl AppController {
@@ -91,6 +97,7 @@ impl AppController {
             .child(&notebook)
             .build();
         window.set_widget_name("lavish-browser-window");
+        webview::configure_downloads(&window);
 
         let controller = Rc::new(Self {
             window,
@@ -99,6 +106,7 @@ impl AppController {
             store,
             rendering: Cell::new(false),
             presentation_count: Cell::new(0),
+            document_views: RefCell::new(HashMap::new()),
         });
         controller.connect_notebook_selection();
         controller.start_control_server()?;
@@ -184,10 +192,31 @@ impl AppController {
                 source_file,
                 url,
             } => {
+                let failed_unchanged: Vec<DocumentKey> = self
+                    .model
+                    .borrow()
+                    .projects
+                    .iter()
+                    .flat_map(|project| &project.documents)
+                    .filter(|document| {
+                        document.key.canonical_source_file == source_file
+                            && document.lavish_url == url
+                            && document.lifecycle == DocumentLifecycle::Failed
+                    })
+                    .map(|document| document.key.clone())
+                    .collect();
                 self.mutate(|model| {
                     model.open_url(project, source_file, url, timestamp());
+                    for key in &failed_unchanged {
+                        model.set_document_lifecycle(key, DocumentLifecycle::Loading, None);
+                    }
                     true
                 });
+                for key in failed_unchanged {
+                    if let Some(view) = self.document_views.borrow().get(&key) {
+                        view.reload();
+                    }
+                }
                 self.presentation_count
                     .set(self.presentation_count.get().saturating_add(1));
                 self.window.present();
@@ -272,6 +301,19 @@ impl AppController {
         }
 
         let model = self.model.borrow().clone();
+        let live_keys: HashSet<_> = model
+            .projects
+            .iter()
+            .flat_map(|project| {
+                project
+                    .documents
+                    .iter()
+                    .map(|document| document.key.clone())
+            })
+            .collect();
+        self.document_views
+            .borrow_mut()
+            .retain(|key, _| live_keys.contains(key));
         for project in &model.projects {
             let page = self.project_page(project);
             let tab = self.project_tab(project);
@@ -373,7 +415,7 @@ impl AppController {
         } else {
             for (index, document) in project.documents.iter().enumerate() {
                 stack.add_named(
-                    &document_placeholder(document, self),
+                    &self.document_surface(document, project.selected_document.as_deref()),
                     Some(&format!("document-{index}")),
                 );
             }
@@ -393,6 +435,82 @@ impl AppController {
         paned.set_resize_start_child(false);
         paned.set_shrink_start_child(false);
         paned
+    }
+
+    fn document_surface(
+        self: &Rc<Self>,
+        document: &lavish_browser_core::Document,
+        selected_source: Option<&str>,
+    ) -> gtk::Widget {
+        let selected = selected_source == Some(&document.key.canonical_source_file);
+        if selected || self.document_views.borrow().contains_key(&document.key) {
+            return self.document_view(document).widget();
+        }
+        document_placeholder(document, self)
+    }
+
+    fn document_view(
+        self: &Rc<Self>,
+        document: &lavish_browser_core::Document,
+    ) -> Rc<webview::DocumentView> {
+        if let Some(view) = self.document_views.borrow().get(&document.key).cloned() {
+            if view.loaded_url() != document.lavish_url {
+                view.navigate(&document.lavish_url);
+            }
+            return view;
+        }
+        let key = document.key.clone();
+        let weak = Rc::downgrade(self);
+        let event_key = key.clone();
+        let emit = Rc::new(move |event| {
+            if let Some(controller) = weak.upgrade() {
+                controller.apply_document_event(&event_key, event);
+            }
+        });
+        let accessible_name = format!(
+            "lavish-view-{}",
+            safe_name(&document.key.canonical_source_file)
+        );
+        let view =
+            webview::DocumentView::new(&document.lavish_url, &accessible_name, &self.window, emit);
+        self.document_views.borrow_mut().insert(key, view.clone());
+        view
+    }
+
+    fn apply_document_event(self: &Rc<Self>, key: &DocumentKey, event: webview::DocumentEvent) {
+        let changed = {
+            let mut model = self.model.borrow_mut();
+            let Some(document) = model
+                .projects
+                .iter_mut()
+                .flat_map(|project| &mut project.documents)
+                .find(|document| document.key == *key)
+            else {
+                return;
+            };
+            match event {
+                webview::DocumentEvent::Loading => {
+                    document.lifecycle = DocumentLifecycle::Loading;
+                    document.load_error = None;
+                }
+                webview::DocumentEvent::Ready(title) => {
+                    document.lifecycle = DocumentLifecycle::Ready;
+                    document.load_error = None;
+                    document.title = title;
+                }
+                webview::DocumentEvent::Failed(error) => {
+                    document.lifecycle = DocumentLifecycle::Failed;
+                    document.load_error = Some(error);
+                }
+            }
+            true
+        };
+        if changed {
+            if let Err(error) = self.store.save(&self.model.borrow()) {
+                eprintln!("could not persist WebView state: {error}");
+            }
+            self.render();
+        }
     }
 
     fn snapshot(&self) -> BrowserStateSnapshot {

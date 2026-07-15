@@ -1360,6 +1360,8 @@ dependencies = [
  "lavish-browser-control",
  "lavish-browser-core",
  "lavish-browser-protocol",
+ "url",
+ "webkit6",
 ]
 
 [[package]]
