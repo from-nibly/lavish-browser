@@ -196,7 +196,8 @@ impl DocumentView {
         ))]);
         let failure_message = gtk::Label::new(Some("The Lavish session is unavailable."));
         failure_message.set_widget_name(&format!("document-failure-message-{identity}"));
-        let retry = gtk::Button::with_label("Reconnect");
+        let retry = gtk::Button::from_icon_name("view-refresh-symbolic");
+        retry.set_tooltip_text(Some("Reconnect"));
         retry.set_widget_name(&format!("document-reconnect-{identity}"));
         retry.update_property(&[gtk::accessible::Property::Label(&format!(
             "Reconnect document {display_name}"
@@ -219,7 +220,8 @@ impl DocumentView {
         failure.append(&retry);
         content.add_named(&failure, Some("reconnect"));
 
-        let reload = gtk::Button::with_label("Reload");
+        let reload = gtk::Button::from_icon_name("view-refresh-symbolic");
+        reload.set_tooltip_text(Some("Reload"));
         reload.set_widget_name(&format!("document-reload-{identity}"));
         reload.update_property(&[gtk::accessible::Property::Label(&format!(
             "Reload document {display_name}"

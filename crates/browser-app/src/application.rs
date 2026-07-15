@@ -679,7 +679,8 @@ fn document_placeholder(
     container.append(&title);
     container.append(&status);
     if matches!(document.lifecycle, DocumentLifecycle::Failed) {
-        let reload = gtk::Button::with_label("Retry loading");
+        let reload = gtk::Button::from_icon_name("view-refresh-symbolic");
+        reload.set_tooltip_text(Some("Retry loading"));
         reload.set_widget_name(&format!("document-placeholder-retry-{identity}"));
         reload.update_property(&[gtk::accessible::Property::Label(&format!(
             "Retry loading document {basename}, source {}, {}",
