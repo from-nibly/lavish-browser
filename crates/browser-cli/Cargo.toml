@@ -6,7 +6,10 @@ publish.workspace = true
 
 [dependencies]
 lavish-browser-control = { path = "../control" }
+lavish-browser-core = { path = "../core" }
 lavish-browser-protocol = { path = "../protocol" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 [[bin]]
 name = "lavish-open"

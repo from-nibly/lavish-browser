@@ -558,7 +558,10 @@ name = "lavish-browser-cli"
 version = "0.1.0"
 dependencies = [
  "lavish-browser-control",
+ "lavish-browser-core",
  "lavish-browser-protocol",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -566,6 +569,8 @@ name = "lavish-browser-control"
 version = "0.1.0"
 dependencies = [
  "lavish-browser-protocol",
+ "libc",
+ "thiserror",
 ]
 
 [[package]]
