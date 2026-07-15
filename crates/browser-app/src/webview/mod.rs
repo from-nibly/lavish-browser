@@ -162,10 +162,43 @@ impl DocumentView {
         url: &str,
         identity: &str,
         display_name: &str,
-        _window: &gtk::ApplicationWindow,
+        window: &gtk::ApplicationWindow,
         emit: Rc<dyn Fn(DocumentEvent)>,
     ) -> Rc<Self> {
-        let webview = webkit6::WebView::new();
+        Self::new_with_webview(
+            webkit6::WebView::new(),
+            url,
+            identity,
+            display_name,
+            window,
+            emit,
+            true,
+        )
+    }
+
+    pub fn new_for_automation(
+        url: &str,
+        identity: &str,
+        display_name: &str,
+        window: &gtk::ApplicationWindow,
+        emit: Rc<dyn Fn(DocumentEvent)>,
+    ) -> Rc<Self> {
+        let webview = webkit6::WebView::builder()
+            .is_controlled_by_automation(true)
+            .automation_presentation_type(webkit6::AutomationBrowsingContextPresentation::Window)
+            .build();
+        Self::new_with_webview(webview, url, identity, display_name, window, emit, false)
+    }
+
+    fn new_with_webview(
+        webview: webkit6::WebView,
+        url: &str,
+        identity: &str,
+        display_name: &str,
+        _window: &gtk::ApplicationWindow,
+        emit: Rc<dyn Fn(DocumentEvent)>,
+        load_initial_url: bool,
+    ) -> Rc<Self> {
         let load_tracker = Rc::new(RefCell::new(LoadTracker::default()));
         webview.set_hexpand(true);
         webview.set_vexpand(true);
@@ -282,7 +315,9 @@ impl DocumentView {
         });
         controller.connect_signals(&content, &failure_message, emit);
         controller.load_tracker.borrow_mut().begin_navigation();
-        controller.webview.load_uri(url);
+        if load_initial_url {
+            controller.webview.load_uri(url);
+        }
         controller
     }
 
@@ -309,6 +344,14 @@ impl DocumentView {
 
     pub fn loaded_url(&self) -> String {
         self.loaded_url.borrow().clone()
+    }
+
+    pub fn automation_webview(&self) -> webkit6::WebView {
+        self.webview.clone()
+    }
+
+    pub fn start_automation_load(&self) {
+        self.webview.load_uri(&self.loaded_url.borrow());
     }
 
     fn connect_signals(
@@ -561,12 +604,44 @@ pub fn configure_downloads(window: &gtk::ApplicationWindow, status: &gtk::Label)
 }
 
 pub fn configure_automation_from_environment() {
-    let enabled = std::env::var("LAVISH_BROWSER_AUTOMATION")
-        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
-    if enabled && let Some(context) = webkit6::WebContext::default() {
+    if automation_enabled()
+        && let Some(context) = webkit6::WebContext::default()
+    {
         context.set_automation_allowed(true);
         eprintln!("WebKit automation enabled for this Lavish Browser process");
     }
+}
+
+pub fn configure_automation_session(
+    selected_view: impl Fn() -> Option<webkit6::WebView> + 'static,
+) {
+    if !automation_enabled() {
+        return;
+    }
+    let Some(context) = webkit6::WebContext::default() else {
+        return;
+    };
+    context.connect_automation_started(move |_, session| {
+        eprintln!("WebKit automation session started");
+        let info = webkit6::ApplicationInfo::new();
+        info.set_name("Lavish Browser");
+        info.set_version(0, 1, 0);
+        session.set_application_info(&info);
+
+        let Some(view) = selected_view() else {
+            eprintln!("WebKit automation requested without a selected production document");
+            return;
+        };
+        session.connect_create_web_view(None, move |_| {
+            eprintln!("WebKit automation attached to selected production document");
+            view.clone()
+        });
+    });
+}
+
+fn automation_enabled() -> bool {
+    std::env::var("LAVISH_BROWSER_AUTOMATION")
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
 }
 
 fn navigation_outcome(

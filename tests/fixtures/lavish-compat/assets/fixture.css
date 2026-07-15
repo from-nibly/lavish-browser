@@ -1,0 +1,9 @@
+@font-face {
+  font-family: "Compatibility Fixture";
+  src: url("fixture.woff2") format("woff2");
+  font-display: swap;
+}
+
+:root { color-scheme: light dark; font-family: "Compatibility Fixture", sans-serif; }
+main { max-width: 52rem; margin: 2rem auto; padding: 1rem; }
+img { display: block; width: 12rem; margin-block: 1rem; }

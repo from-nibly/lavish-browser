@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lavish WebKitGTK compatibility fixture</title>
+  <link rel="stylesheet" href="assets/fixture.css">
+</head>
+<body>
+  <main>
+    <h1 id="fixture-title">Lavish WebKitGTK compatibility fixture</h1>
+    <p id="text-range">Secret-free local fixture text for annotation and live-reload validation.</p>
+    <img id="relative-image" src="assets/fixture.svg" alt="Local relative asset">
+    <pre class="mermaid">flowchart LR
+      A[Production WebView] --&gt; B[Upstream Lavish]
+    </pre>
+    <button id="clipboard" type="button">Copy fixture text</button>
+    <a id="download" href="assets/download.txt" download>Download fixture</a>
+    <a id="external" href="https://example.com/" target="_blank" rel="noopener">External popup</a>
+    <output id="script-status">script pending</output>
+  </main>
+  <script src="assets/fixture.js"></script>
+</body>
+</html>

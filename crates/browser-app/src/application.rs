@@ -24,10 +24,19 @@ const APPLICATION_ID: &str = "works.from-nibly.LavishBrowser";
 
 pub fn run() -> glib::ExitCode {
     webview::configure_automation_from_environment();
+    let controller: Rc<RefCell<Option<Rc<AppController>>>> = Rc::new(RefCell::new(None));
+    webview::configure_automation_session({
+        let controller = controller.clone();
+        move || {
+            controller
+                .borrow()
+                .as_ref()
+                .and_then(|controller| controller.automation_webview())
+        }
+    });
     let app = gtk::Application::builder()
         .application_id(APPLICATION_ID)
         .build();
-    let controller: Rc<RefCell<Option<Rc<AppController>>>> = Rc::new(RefCell::new(None));
 
     app.connect_activate({
         let controller = controller.clone();
@@ -518,6 +527,18 @@ impl AppController {
             }
             return view;
         }
+        let view = self.create_document_view(document, false);
+        self.document_views
+            .borrow_mut()
+            .insert(document.key.clone(), view.clone());
+        view
+    }
+
+    fn create_document_view(
+        self: &Rc<Self>,
+        document: &lavish_browser_core::Document,
+        automation: bool,
+    ) -> Rc<webview::DocumentView> {
         let key = document.key.clone();
         let weak = Rc::downgrade(self);
         let event_key = key.clone();
@@ -536,15 +557,55 @@ impl AppController {
             document.key.canonical_source_file,
             project_accessible_identity(&document.key.project)
         );
-        let view = webview::DocumentView::new(
-            &document.lavish_url,
-            &identity,
-            &accessible_description,
-            &self.window,
-            emit,
-        );
-        self.document_views.borrow_mut().insert(key, view.clone());
-        view
+        if automation {
+            webview::DocumentView::new_for_automation(
+                &document.lavish_url,
+                &identity,
+                &accessible_description,
+                &self.window,
+                emit,
+            )
+        } else {
+            webview::DocumentView::new(
+                &document.lavish_url,
+                &identity,
+                &accessible_description,
+                &self.window,
+                emit,
+            )
+        }
+    }
+
+    fn automation_webview(self: &Rc<Self>) -> Option<webkit6::WebView> {
+        let document = {
+            let model = self.model.borrow();
+            let project_key = model.selected_project.as_ref()?;
+            let project = model
+                .projects
+                .iter()
+                .find(|project| &project.key == project_key)?;
+            let source = project.selected_document.as_ref()?;
+            project
+                .documents
+                .iter()
+                .find(|document| &document.key.canonical_source_file == source)?
+                .clone()
+        };
+        let view = self.create_document_view(&document, true);
+        let webview = view.automation_webview();
+        self.document_views
+            .borrow_mut()
+            .insert(document.key.clone(), view.clone());
+        let weak = Rc::downgrade(self);
+        glib::idle_add_local_once(move || {
+            if let Some(controller) = weak.upgrade() {
+                controller.render();
+            }
+        });
+        glib::timeout_add_local_once(Duration::from_secs(1), move || {
+            view.start_automation_load();
+        });
+        Some(webview)
     }
 
     fn apply_document_event(self: &Rc<Self>, key: &DocumentKey, event: webview::DocumentEvent) {

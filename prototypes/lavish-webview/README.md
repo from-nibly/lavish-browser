@@ -16,6 +16,10 @@ The **Inspector** button opens WebKit's inspector for compatibility investigatio
 
 ## Compatibility proof checklist
 
+The production gate, repeatable fixture/harness, exact environment, and current
+blocked capability matrix are maintained in [`docs/compatibility.md`](../../docs/compatibility.md).
+The prototype is not accepted as release evidence.
+
 Test against a representative real Lavish session rather than a synthetic HTML page:
 
 - [ ] Session chrome renders and the artifact iframe becomes visible after the layout gate.
