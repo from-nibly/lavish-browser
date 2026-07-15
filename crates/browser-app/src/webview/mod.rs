@@ -1,5 +1,8 @@
 use gtk::gio;
 use gtk::prelude::*;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::rc::Rc;
 use url::Url;
 use webkit6::prelude::*;
@@ -9,6 +12,108 @@ pub enum DocumentEvent {
     Loading,
     Ready(Option<String>),
     Failed(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefreshAction {
+    Keep,
+    Navigate,
+    Reload,
+}
+
+pub(crate) fn refresh_action(
+    current_url: &str,
+    submitted_url: &str,
+    failed: bool,
+) -> RefreshAction {
+    if current_url != submitted_url {
+        RefreshAction::Navigate
+    } else if failed {
+        RefreshAction::Reload
+    } else {
+        RefreshAction::Keep
+    }
+}
+
+#[derive(Debug, Default)]
+struct LoadTracker {
+    failed: bool,
+}
+
+impl LoadTracker {
+    fn begin_navigation(&mut self) {
+        self.failed = false;
+    }
+
+    fn started(&self) -> Option<DocumentEvent> {
+        (!self.failed).then_some(DocumentEvent::Loading)
+    }
+
+    fn committed(&self) -> Option<DocumentEvent> {
+        (!self.failed).then_some(DocumentEvent::Loading)
+    }
+
+    fn failed(&mut self, message: String) -> DocumentEvent {
+        self.failed = true;
+        DocumentEvent::Failed(message)
+    }
+
+    fn finished(
+        &mut self,
+        status: Option<u32>,
+        title: Option<String>,
+        uri: &str,
+    ) -> Option<DocumentEvent> {
+        if self.failed {
+            return None;
+        }
+        if status.is_some_and(|status| (200..400).contains(&status)) {
+            Some(DocumentEvent::Ready(title))
+        } else {
+            self.failed = true;
+            Some(DocumentEvent::Failed(match status {
+                Some(status) => format!("HTTP {status} loading {uri}"),
+                None => format!("No HTTP response loading {uri}"),
+            }))
+        }
+    }
+}
+
+pub(crate) struct RetainedRegistry<K, V> {
+    values: HashMap<K, V>,
+}
+
+impl<K: Eq + Hash, V> Default for RetainedRegistry<K, V> {
+    fn default() -> Self {
+        Self {
+            values: HashMap::new(),
+        }
+    }
+}
+
+impl<K: Eq + Hash, V> RetainedRegistry<K, V> {
+    pub(crate) fn get(&self, key: &K) -> Option<&V> {
+        self.values.get(key)
+    }
+
+    pub(crate) fn contains_key(&self, key: &K) -> bool {
+        self.values.contains_key(key)
+    }
+
+    pub(crate) fn insert(&mut self, key: K, value: V) {
+        self.values.insert(key, value);
+    }
+
+    pub(crate) fn retain_keys(&mut self, live: &HashSet<K>) -> usize {
+        let before = self.values.len();
+        self.values.retain(|key, _| live.contains(key));
+        before - self.values.len()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.values.len()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +127,8 @@ pub struct DocumentView {
     root: gtk::Box,
     webview: webkit6::WebView,
     status: gtk::Label,
-    loaded_url: Rc<std::cell::RefCell<String>>,
+    loaded_url: Rc<RefCell<String>>,
+    load_tracker: Rc<RefCell<LoadTracker>>,
 }
 
 impl DocumentView {
@@ -33,6 +139,7 @@ impl DocumentView {
         emit: Rc<dyn Fn(DocumentEvent)>,
     ) -> Rc<Self> {
         let webview = webkit6::WebView::new();
+        let load_tracker = Rc::new(RefCell::new(LoadTracker::default()));
         webview.set_hexpand(true);
         webview.set_vexpand(true);
         webview.set_widget_name(accessible_name);
@@ -65,7 +172,9 @@ impl DocumentView {
         {
             let webview = webview.downgrade();
             let content = content.downgrade();
+            let load_tracker = load_tracker.clone();
             retry.connect_clicked(move |_| {
+                load_tracker.borrow_mut().begin_navigation();
                 if let Some(content) = content.upgrade() {
                     content.set_visible_child_name("web-content");
                 }
@@ -86,7 +195,9 @@ impl DocumentView {
         {
             let webview = webview.downgrade();
             let content = content.downgrade();
+            let load_tracker = load_tracker.clone();
             reload.connect_clicked(move |_| {
+                load_tracker.borrow_mut().begin_navigation();
                 if let Some(content) = content.upgrade() {
                     content.set_visible_child_name("web-content");
                 }
@@ -127,9 +238,11 @@ impl DocumentView {
             root,
             webview,
             status,
-            loaded_url: Rc::new(std::cell::RefCell::new(url.to_owned())),
+            loaded_url: Rc::new(RefCell::new(url.to_owned())),
+            load_tracker,
         });
         controller.connect_signals(&content, &failure_message, emit);
+        controller.load_tracker.borrow_mut().begin_navigation();
         controller.webview.load_uri(url);
         controller
     }
@@ -141,6 +254,7 @@ impl DocumentView {
     pub fn navigate(&self, url: &str) {
         if self.loaded_url.borrow().as_str() != url {
             self.loaded_url.replace(url.to_owned());
+            self.load_tracker.borrow_mut().begin_navigation();
             self.status
                 .set_text("Connecting to refreshed Lavish session…");
             self.webview.load_uri(url);
@@ -148,7 +262,9 @@ impl DocumentView {
     }
 
     pub fn reload(&self) {
+        self.load_tracker.borrow_mut().begin_navigation();
         self.status.set_text("Reconnecting to upstream Lavish…");
+        eprintln!("reloading retained Lavish document");
         self.webview.reload();
     }
 
@@ -162,27 +278,68 @@ impl DocumentView {
         failure_message: &gtk::Label,
         emit: Rc<dyn Fn(DocumentEvent)>,
     ) {
+        let load_tracker = self.load_tracker.clone();
         {
             let status = self.status.clone();
             let content = content.downgrade();
+            let failure_message = failure_message.downgrade();
             let emit = emit.clone();
+            let load_tracker = load_tracker.clone();
             self.webview
                 .connect_load_changed(move |view, event| match event {
                     webkit6::LoadEvent::Started => {
-                        if let Some(content) = content.upgrade() {
-                            content.set_visible_child_name("web-content");
+                        if let Some(event) = load_tracker.borrow().started() {
+                            if let Some(content) = content.upgrade() {
+                                content.set_visible_child_name("web-content");
+                            }
+                            status.set_text("Loading upstream Lavish…");
+                            emit(event);
                         }
-                        status.set_text("Loading upstream Lavish…");
-                        emit(DocumentEvent::Loading);
                     }
-                    webkit6::LoadEvent::Committed => status.set_text("Rendering Lavish session…"),
+                    webkit6::LoadEvent::Committed => {
+                        if let Some(event) = load_tracker.borrow().committed() {
+                            if let Some(content) = content.upgrade() {
+                                content.set_visible_child_name("web-content");
+                            }
+                            status.set_text("Rendering Lavish session…");
+                            emit(event);
+                        }
+                    }
                     webkit6::LoadEvent::Finished => {
                         let title = view.title().map(|value| value.to_string());
-                        status.set_text(&format!(
-                            "Loaded: {}",
-                            title.as_deref().unwrap_or("untitled Lavish session")
-                        ));
-                        emit(DocumentEvent::Ready(title));
+                        let response_status = view
+                            .main_resource()
+                            .and_then(|resource| resource.response())
+                            .map(|response| response.status_code());
+                        let uri = view
+                            .uri()
+                            .map(|value| value.to_string())
+                            .unwrap_or_default();
+                        if let Some(event) =
+                            load_tracker
+                                .borrow_mut()
+                                .finished(response_status, title.clone(), &uri)
+                        {
+                            match &event {
+                                DocumentEvent::Ready(_) => status.set_text(&format!(
+                                    "Loaded: {}",
+                                    title.as_deref().unwrap_or("untitled Lavish session")
+                                )),
+                                DocumentEvent::Failed(message) => {
+                                    status.set_text(
+                                        "Reconnect required: no successful HTTP response",
+                                    );
+                                    if let Some(failure_message) = failure_message.upgrade() {
+                                        failure_message.set_text(message);
+                                    }
+                                    if let Some(content) = content.upgrade() {
+                                        content.set_visible_child_name("reconnect");
+                                    }
+                                }
+                                DocumentEvent::Loading => {}
+                            }
+                            emit(event);
+                        }
                     }
                     _ => {}
                 });
@@ -192,8 +349,10 @@ impl DocumentView {
             let content = content.downgrade();
             let failure_message = failure_message.downgrade();
             let emit = emit.clone();
+            let load_tracker = load_tracker.clone();
             self.webview.connect_load_failed(move |_, _, uri, error| {
                 let message = format!("Could not load {uri}: {error}");
+                eprintln!("WebKit load failed: {message}");
                 status.set_text(&format!("Reconnect required: {error}"));
                 if let Some(failure_message) = failure_message.upgrade() {
                     failure_message.set_text(&message);
@@ -201,7 +360,7 @@ impl DocumentView {
                 if let Some(content) = content.upgrade() {
                     content.set_visible_child_name("reconnect");
                 }
-                emit(DocumentEvent::Failed(message));
+                emit(load_tracker.borrow_mut().failed(message));
                 true
             });
         }
@@ -210,6 +369,27 @@ impl DocumentView {
             let content = content.downgrade();
             let failure_message = failure_message.downgrade();
             let emit = emit.clone();
+            let load_tracker = load_tracker.clone();
+            self.webview
+                .connect_load_failed_with_tls_errors(move |_, uri, _, errors| {
+                    let message = format!("TLS failure loading {uri}: {errors:?}");
+                    status.set_text("TLS failure. Reconnect required.");
+                    if let Some(failure_message) = failure_message.upgrade() {
+                        failure_message.set_text(&message);
+                    }
+                    if let Some(content) = content.upgrade() {
+                        content.set_visible_child_name("reconnect");
+                    }
+                    emit(load_tracker.borrow_mut().failed(message));
+                    true
+                });
+        }
+        {
+            let status = self.status.clone();
+            let content = content.downgrade();
+            let failure_message = failure_message.downgrade();
+            let emit = emit.clone();
+            let load_tracker = load_tracker.clone();
             self.webview
                 .connect_web_process_terminated(move |_, reason| {
                     let message = format!("Web process terminated: {reason:?}");
@@ -220,7 +400,7 @@ impl DocumentView {
                     if let Some(content) = content.upgrade() {
                         content.set_visible_child_name("reconnect");
                     }
-                    emit(DocumentEvent::Failed(message));
+                    emit(load_tracker.borrow_mut().failed(message));
                 });
         }
 
@@ -366,9 +546,97 @@ fn navigation_outcome(
 
 #[cfg(test)]
 mod tests {
-    use super::{NavigationOutcome, navigation_outcome};
+    use super::{
+        DocumentEvent, LoadTracker, NavigationOutcome, RefreshAction, RetainedRegistry,
+        navigation_outcome, refresh_action,
+    };
+    use std::collections::HashSet;
 
     const SESSION: &str = "http://127.0.0.1:4387/session/abc";
+
+    #[test]
+    fn failure_wins_over_finished_until_a_later_explicit_navigation() {
+        let mut tracker = LoadTracker::default();
+        tracker.begin_navigation();
+        assert_eq!(tracker.started(), Some(DocumentEvent::Loading));
+        assert_eq!(
+            tracker.failed("connection refused".into()),
+            DocumentEvent::Failed("connection refused".into())
+        );
+        assert_eq!(tracker.committed(), None);
+        assert_eq!(tracker.finished(Some(200), None, SESSION), None);
+
+        tracker.begin_navigation();
+        assert_eq!(tracker.started(), Some(DocumentEvent::Loading));
+        assert_eq!(tracker.committed(), Some(DocumentEvent::Loading));
+        assert_eq!(
+            tracker.finished(Some(200), Some("Recovered · Lavish".into()), SESSION),
+            Some(DocumentEvent::Ready(Some("Recovered · Lavish".into())))
+        );
+    }
+
+    #[test]
+    fn process_termination_uses_the_same_sticky_failure_transition() {
+        let mut tracker = LoadTracker::default();
+        tracker.begin_navigation();
+        assert_eq!(tracker.started(), Some(DocumentEvent::Loading));
+        assert_eq!(
+            tracker.failed("Web process terminated: Crashed".into()),
+            DocumentEvent::Failed("Web process terminated: Crashed".into())
+        );
+        assert_eq!(tracker.committed(), None);
+        assert_eq!(
+            tracker.finished(Some(200), Some("stale title".into()), SESSION),
+            None
+        );
+    }
+
+    #[test]
+    fn finished_without_a_successful_http_response_is_a_sticky_failure() {
+        let mut tracker = LoadTracker::default();
+        tracker.begin_navigation();
+        assert_eq!(
+            tracker.finished(None, None, "http://127.0.0.1:9/session/unreachable"),
+            Some(DocumentEvent::Failed(
+                "No HTTP response loading http://127.0.0.1:9/session/unreachable".into()
+            ))
+        );
+        assert_eq!(tracker.committed(), None);
+        assert_eq!(
+            tracker.finished(Some(200), Some("error page".into()), SESSION),
+            None
+        );
+    }
+
+    #[test]
+    fn refresh_distinguishes_changed_healthy_and_unchanged_failed_urls() {
+        assert_eq!(refresh_action(SESSION, SESSION, false), RefreshAction::Keep);
+        assert_eq!(
+            refresh_action(SESSION, SESSION, true),
+            RefreshAction::Reload
+        );
+        assert_eq!(
+            refresh_action(SESSION, "http://127.0.0.1:9000/session/abc", true),
+            RefreshAction::Navigate
+        );
+    }
+
+    #[test]
+    fn retained_registry_keeps_project_scoped_identity_and_cleans_closed_keys() {
+        let first = ("project-a", "/tmp/report.html");
+        let second = ("project-b", "/tmp/report.html");
+        let mut registry = RetainedRegistry::default();
+        registry.insert(first, 11_u64);
+        registry.insert(second, 22_u64);
+        assert_eq!(registry.get(&first), Some(&11));
+        assert_eq!(registry.get(&second), Some(&22));
+        assert_eq!(registry.len(), 2);
+
+        assert_eq!(registry.retain_keys(&HashSet::from([second])), 1);
+        assert_eq!(registry.get(&first), None);
+        assert_eq!(registry.get(&second), Some(&22));
+        assert_eq!(registry.len(), 1);
+    }
 
     #[test]
     fn navigation_policy_preserves_session_and_externalizes_user_links() {

@@ -14,7 +14,7 @@ use lavish_browser_protocol::{
     ProjectSnapshot, RequestEnvelope, ResponseEnvelope, ResponseStatus,
 };
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::mpsc;
@@ -69,7 +69,7 @@ struct AppController {
     store: MetadataStore,
     rendering: Cell<bool>,
     presentation_count: Cell<u64>,
-    document_views: RefCell<HashMap<DocumentKey, Rc<webview::DocumentView>>>,
+    document_views: RefCell<webview::RetainedRegistry<DocumentKey, Rc<webview::DocumentView>>>,
 }
 
 impl AppController {
@@ -106,7 +106,7 @@ impl AppController {
             store,
             rendering: Cell::new(false),
             presentation_count: Cell::new(0),
-            document_views: RefCell::new(HashMap::new()),
+            document_views: RefCell::new(webview::RetainedRegistry::default()),
         });
         controller.connect_notebook_selection();
         controller.start_control_server()?;
@@ -154,7 +154,7 @@ impl AppController {
                 );
             }
             reply_receiver
-                .recv_timeout(Duration::from_secs(2))
+                .recv_timeout(Duration::from_secs(10))
                 .unwrap_or_else(|_| {
                     response(
                         request_id,
@@ -192,29 +192,38 @@ impl AppController {
                 source_file,
                 url,
             } => {
-                let failed_unchanged: Vec<DocumentKey> = self
+                let view_actions: Vec<_> = self
                     .model
                     .borrow()
                     .projects
                     .iter()
                     .flat_map(|project| &project.documents)
-                    .filter(|document| {
-                        document.key.canonical_source_file == source_file
-                            && document.lavish_url == url
-                            && document.lifecycle == DocumentLifecycle::Failed
+                    .filter(|document| document.key.canonical_source_file == source_file)
+                    .map(|document| {
+                        (
+                            document.key.clone(),
+                            webview::refresh_action(
+                                &document.lavish_url,
+                                &url,
+                                document.lifecycle == DocumentLifecycle::Failed,
+                            ),
+                        )
                     })
-                    .map(|document| document.key.clone())
                     .collect();
+                let submitted_url = url.clone();
                 self.mutate(|model| {
                     model.open_url(project, source_file, url, timestamp());
-                    for key in &failed_unchanged {
-                        model.set_document_lifecycle(key, DocumentLifecycle::Loading, None);
-                    }
                     true
                 });
-                for key in failed_unchanged {
-                    if let Some(view) = self.document_views.borrow().get(&key) {
-                        view.reload();
+                for (key, action) in view_actions {
+                    let views = self.document_views.borrow();
+                    let Some(view) = views.get(&key) else {
+                        continue;
+                    };
+                    match action {
+                        webview::RefreshAction::Keep => {}
+                        webview::RefreshAction::Navigate => view.navigate(&submitted_url),
+                        webview::RefreshAction::Reload => view.reload(),
                     }
                 }
                 self.presentation_count
@@ -311,9 +320,10 @@ impl AppController {
                     .map(|document| document.key.clone())
             })
             .collect();
-        self.document_views
-            .borrow_mut()
-            .retain(|key, _| live_keys.contains(key));
+        let released_views = self.document_views.borrow_mut().retain_keys(&live_keys);
+        if released_views > 0 {
+            eprintln!("released {released_views} retained document view(s)");
+        }
         for project in &model.projects {
             let page = self.project_page(project);
             let tab = self.project_tab(project);
