@@ -2,6 +2,8 @@
 
 pub mod labels;
 pub mod model;
+pub mod persistence;
+pub mod reconcile;
 
 pub use lavish_browser_protocol::ProjectKey;
 pub use model::{BrowserModel, Document, DocumentKey, DocumentLifecycle, OpenOutcome, Project};
