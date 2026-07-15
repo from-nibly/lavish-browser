@@ -143,6 +143,22 @@ impl<R> ZellijCommandState<R> {
         }
         String::from_utf8(output.stdout).map_err(|_| ReconcileError::InvalidUtf8 { arguments })
     }
+
+    fn run_if_live(&self, arguments: Vec<String>) -> Result<Option<String>, ReconcileError>
+    where
+        R: CommandRunner,
+    {
+        let output = self
+            .runner
+            .run("zellij", &arguments)
+            .map_err(ReconcileError::Command)?;
+        if !output.success {
+            return Ok(None);
+        }
+        String::from_utf8(output.stdout)
+            .map(Some)
+            .map_err(|_| ReconcileError::InvalidUtf8 { arguments })
+    }
 }
 
 impl<R: CommandRunner> ZellijStateSource for ZellijCommandState<R> {
@@ -168,13 +184,18 @@ impl<R: CommandRunner> ZellijStateSource for ZellijCommandState<R> {
             if !active_sessions.contains(session_name.as_str()) {
                 continue;
             }
-            let tab_output = self.run(vec![
+            let Some(tab_output) = self.run_if_live(vec![
                 "--session".into(),
                 session_name.clone(),
                 "action".into(),
                 "list-tabs".into(),
                 "--json".into(),
-            ])?;
+            ])?
+            else {
+                // Sessions can disappear between the list and tab queries. Some Zellij
+                // versions also include resumable exited sessions in the short list.
+                continue;
+            };
             let tabs: Vec<TabRecord> = serde_json::from_str(&tab_output).map_err(|error| {
                 ReconcileError::InvalidTabJson {
                     session_name: session_name.clone(),

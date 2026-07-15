@@ -172,6 +172,14 @@ fn success(stdout: &str) -> CommandOutput {
     }
 }
 
+fn failure(stderr: &str) -> CommandOutput {
+    CommandOutput {
+        success: false,
+        stdout: Vec::new(),
+        stderr: stderr.as_bytes().to_vec(),
+    }
+}
+
 #[test]
 fn command_adapter_uses_required_commands_and_parses_fixture_json() {
     let runner = FakeRunner {
@@ -202,6 +210,24 @@ fn command_adapter_uses_required_commands_and_parses_fixture_json() {
             vec!["--session", "main", "action", "list-tabs", "--json"],
         ]
     );
+}
+
+#[test]
+fn listed_but_exited_or_raced_session_is_treated_as_not_live() {
+    let runner = FakeRunner {
+        outputs: Mutex::new(VecDeque::from([
+            success("exited\n"),
+            failure("Session 'exited' not found"),
+        ])),
+        calls: Mutex::new(Vec::new()),
+    };
+    let adapter = ZellijCommandState::new(runner);
+
+    let state = adapter
+        .live_state(&HashSet::from(["exited".into()]))
+        .unwrap();
+
+    assert!(!state.contains("exited", 1));
 }
 
 #[test]
