@@ -84,20 +84,37 @@ impl AppController {
         }
 
         let notebook = gtk::Notebook::new();
+        notebook.set_widget_name("project-notebook");
+        notebook.update_property(&[gtk::accessible::Property::Label("Lavish projects")]);
         notebook.set_hexpand(true);
         notebook.set_vexpand(true);
         notebook.set_scrollable(true);
         notebook.set_show_border(false);
+
+        let download_status = gtk::Label::new(Some("No active downloads"));
+        download_status.set_xalign(0.0);
+        download_status.set_margin_top(6);
+        download_status.set_margin_bottom(6);
+        download_status.set_margin_start(8);
+        download_status.set_margin_end(8);
+        download_status.set_widget_name("download-status");
+        download_status.update_property(&[gtk::accessible::Property::Label("Download status")]);
+        download_status.set_visible(false);
+
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        root.set_widget_name("lavish-browser-content");
+        root.append(&notebook);
+        root.append(&download_status);
 
         let window = gtk::ApplicationWindow::builder()
             .application(app)
             .title("Lavish Browser")
             .default_width(1280)
             .default_height(800)
-            .child(&notebook)
+            .child(&root)
             .build();
         window.set_widget_name("lavish-browser-window");
-        webview::configure_downloads(&window);
+        webview::configure_downloads(&window, &download_status);
 
         let controller = Rc::new(Self {
             window,
@@ -341,15 +358,29 @@ impl AppController {
     }
 
     fn project_tab(self: &Rc<Self>, project: &lavish_browser_core::Project) -> gtk::Box {
+        let identity = project_identity(&project.key);
         let tab = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        tab.set_widget_name(&format!("project-tab-{identity}"));
+        tab.update_property(&[gtk::accessible::Property::Label(&format!(
+            "Project {}, {}",
+            project.label,
+            project_accessible_identity(&project.key)
+        ))]);
         let label = gtk::Label::new(Some(&project.label));
-        label.set_widget_name(&format!("project-tab-{}", safe_name(&project.label)));
+        label.set_widget_name(&format!("project-tab-label-{identity}"));
+        label.update_property(&[gtk::accessible::Property::Label(&format!(
+            "Project {}, {}",
+            project.label,
+            project_accessible_identity(&project.key)
+        ))]);
         label.set_tooltip_text(project.raw_tab_name.as_deref());
         let close = gtk::Button::from_icon_name("window-close-symbolic");
+        close.set_widget_name(&format!("project-close-{identity}"));
         close.set_tooltip_text(Some(&format!("Close project {}", project.label)));
         close.update_property(&[gtk::accessible::Property::Label(&format!(
-            "Close project {}",
-            project.label
+            "Close project {}, {}",
+            project.label,
+            project_accessible_identity(&project.key)
         ))]);
         close.add_css_class("flat");
         let key = project.key.clone();
@@ -365,9 +396,15 @@ impl AppController {
     }
 
     fn project_page(self: &Rc<Self>, project: &lavish_browser_core::Project) -> gtk::Paned {
+        let identity = project_identity(&project.key);
         let list = gtk::ListBox::new();
         list.set_selection_mode(gtk::SelectionMode::Single);
-        list.set_widget_name(&format!("documents-{}", safe_name(&project.label)));
+        list.set_widget_name(&format!("project-documents-{identity}"));
+        list.update_property(&[gtk::accessible::Property::Label(&format!(
+            "Documents for project {}, {}",
+            project.label,
+            project_accessible_identity(&project.key)
+        ))]);
         list.set_width_request(280);
 
         for document in &project.documents {
@@ -416,11 +453,17 @@ impl AppController {
             .child(&list)
             .build();
         let stack = gtk::Stack::new();
+        stack.set_widget_name(&format!("project-document-stack-{identity}"));
         stack.set_hexpand(true);
         stack.set_vexpand(true);
         if project.documents.is_empty() {
             let empty = gtk::Label::new(Some("No documents in this project"));
-            empty.set_widget_name("empty-project-placeholder");
+            empty.set_widget_name(&format!("empty-project-placeholder-{identity}"));
+            empty.update_property(&[gtk::accessible::Property::Label(&format!(
+                "No documents in project {}, {}",
+                project.label,
+                project_accessible_identity(&project.key)
+            ))]);
             stack.add_named(&empty, Some("empty"));
         } else {
             for (index, document) in project.documents.iter().enumerate() {
@@ -439,6 +482,12 @@ impl AppController {
             }
         }
         let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
+        paned.set_widget_name(&format!("project-page-{identity}"));
+        paned.update_property(&[gtk::accessible::Property::Label(&format!(
+            "Project page {}, {}",
+            project.label,
+            project_accessible_identity(&project.key)
+        ))]);
         paned.set_start_child(Some(&sidebar));
         paned.set_end_child(Some(&stack));
         paned.set_position(280);
@@ -477,12 +526,23 @@ impl AppController {
                 controller.apply_document_event(&event_key, event);
             }
         });
-        let accessible_name = format!(
-            "lavish-view-{}",
-            safe_name(&document.key.canonical_source_file)
+        let identity = document_identity(&document.key);
+        let basename = Path::new(&document.key.canonical_source_file)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&document.key.canonical_source_file);
+        let accessible_description = format!(
+            "{basename}, source {}, {}",
+            document.key.canonical_source_file,
+            project_accessible_identity(&document.key.project)
         );
-        let view =
-            webview::DocumentView::new(&document.lavish_url, &accessible_name, &self.window, emit);
+        let view = webview::DocumentView::new(
+            &document.lavish_url,
+            &identity,
+            &accessible_description,
+            &self.window,
+            emit,
+        );
         self.document_views.borrow_mut().insert(key, view.clone());
         view
     }
@@ -558,10 +618,14 @@ fn document_row(
     let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     labels.set_hexpand(true);
     content.append(&labels);
+    let identity = document_identity(&document.key);
     let close = gtk::Button::from_icon_name("window-close-symbolic");
+    close.set_widget_name(&format!("document-close-{identity}"));
     close.set_tooltip_text(Some(&format!("Close document {basename}")));
     close.update_property(&[gtk::accessible::Property::Label(&format!(
-        "Close document {basename}"
+        "Close document {basename}, source {}, {}",
+        document.key.canonical_source_file,
+        project_accessible_identity(&document.key.project)
     ))]);
     close.add_css_class("flat");
     let key = document.key.clone();
@@ -574,9 +638,11 @@ fn document_row(
     content.append(&close);
 
     let row = gtk::ListBoxRow::new();
-    row.set_widget_name(&format!("document-row-{}", safe_name(basename)));
+    row.set_widget_name(&format!("document-row-{identity}"));
     row.update_property(&[gtk::accessible::Property::Label(&format!(
-        "Document {basename}, {}",
+        "Document {basename}, source {}, {}, {}",
+        document.key.canonical_source_file,
+        project_accessible_identity(&document.key.project),
         lifecycle_text(&document.lifecycle)
     ))]);
     row.set_child(Some(&content));
@@ -587,7 +653,9 @@ fn document_placeholder(
     document: &lavish_browser_core::Document,
     controller: &Rc<AppController>,
 ) -> gtk::Widget {
+    let identity = document_identity(&document.key);
     let container = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    container.set_widget_name(&format!("document-placeholder-{identity}"));
     container.set_halign(gtk::Align::Center);
     container.set_valign(gtk::Align::Center);
     let source = &document.key.canonical_source_file;
@@ -601,15 +669,23 @@ fn document_placeholder(
         "{} — Web content will be created when selected",
         lifecycle_text(&document.lifecycle)
     )));
-    status.set_widget_name("document-placeholder");
+    status.set_widget_name(&format!("document-placeholder-status-{identity}"));
     status.update_property(&[gtk::accessible::Property::Label(&format!(
-        "Document placeholder for {basename}, {}",
+        "Document placeholder for {basename}, source {}, {}, {}",
+        document.key.canonical_source_file,
+        project_accessible_identity(&document.key.project),
         lifecycle_text(&document.lifecycle)
     ))]);
     container.append(&title);
     container.append(&status);
     if matches!(document.lifecycle, DocumentLifecycle::Failed) {
         let reload = gtk::Button::with_label("Retry loading");
+        reload.set_widget_name(&format!("document-placeholder-retry-{identity}"));
+        reload.update_property(&[gtk::accessible::Property::Label(&format!(
+            "Retry loading document {basename}, source {}, {}",
+            document.key.canonical_source_file,
+            project_accessible_identity(&document.key.project)
+        ))]);
         let key = document.key.clone();
         let weak = Rc::downgrade(controller);
         reload.connect_clicked(move |_| {
@@ -684,17 +760,49 @@ fn lifecycle_text(lifecycle: &DocumentLifecycle) -> &'static str {
     }
 }
 
-fn safe_name(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect()
+fn project_accessible_identity(key: &ProjectKey) -> String {
+    match key {
+        ProjectKey::Zellij {
+            session_name,
+            stable_tab_id,
+        } => format!("Zellij session {session_name}, tab {stable_tab_id}"),
+        ProjectKey::Standalone { label } => format!("standalone project {label}"),
+    }
+}
+
+fn project_identity(key: &ProjectKey) -> String {
+    match key {
+        ProjectKey::Zellij {
+            session_name,
+            stable_tab_id,
+        } => format!(
+            "zellij-{}-tab-{stable_tab_id}",
+            encode_identifier(session_name)
+        ),
+        ProjectKey::Standalone { label } => {
+            format!("standalone-{}", encode_identifier(label))
+        }
+    }
+}
+
+fn document_identity(key: &DocumentKey) -> String {
+    format!(
+        "{}-source-{}",
+        project_identity(&key.project),
+        encode_identifier(&key.canonical_source_file)
+    )
+}
+
+fn encode_identifier(value: &str) -> String {
+    use std::fmt::Write;
+
+    value.as_bytes().iter().fold(
+        String::with_capacity(value.len().saturating_mul(2)),
+        |mut encoded, byte| {
+            write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+            encoded
+        },
+    )
 }
 
 fn timestamp() -> u64 {
@@ -708,9 +816,83 @@ fn timestamp() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::snapshot;
-    use lavish_browser_core::BrowserModel;
+    use super::{document_identity, project_identity, snapshot};
+    use lavish_browser_core::{BrowserModel, DocumentKey, DocumentLifecycle};
     use lavish_browser_protocol::{ProjectKey, ProjectMetadata};
+
+    #[test]
+    fn stable_identifiers_ignore_mutable_project_and_document_state() {
+        let key = ProjectKey::Zellij {
+            session_name: "main/session".into(),
+            stable_tab_id: 17,
+        };
+        let project_id = project_identity(&key);
+        let mut model = BrowserModel::default();
+        model.open_url(
+            ProjectMetadata {
+                key: key.clone(),
+                label: "Initial label".into(),
+                raw_tab_name: Some("initial raw title".into()),
+            },
+            "/tmp/report.html",
+            "http://127.0.0.1:4387/session/report",
+            1,
+        );
+        let document_key = model.projects[0].documents[0].key.clone();
+        let document_id = document_identity(&document_key);
+        model.projects[0].label = "Renamed project".into();
+        model.projects[0].raw_tab_name = Some("renamed raw title".into());
+        model.projects[0].documents[0].title = Some("Changed Lavish title".into());
+        model.projects[0].documents[0].lifecycle = DocumentLifecycle::Failed;
+
+        assert_eq!(project_identity(&model.projects[0].key), project_id);
+        assert_eq!(
+            document_identity(&model.projects[0].documents[0].key),
+            document_id
+        );
+        assert_eq!(project_id, "zellij-6d61696e2f73657373696f6e-tab-17");
+        assert_eq!(
+            document_id,
+            "zellij-6d61696e2f73657373696f6e-tab-17-source-2f746d702f7265706f72742e68746d6c"
+        );
+    }
+
+    #[test]
+    fn document_identifiers_disambiguate_paths_and_projects_without_lossy_escaping() {
+        let first_project = ProjectKey::Standalone {
+            label: "First".into(),
+        };
+        let second_project = ProjectKey::Standalone {
+            label: "Second".into(),
+        };
+        let first = DocumentKey {
+            project: first_project.clone(),
+            canonical_source_file: "/work/a/report.html".into(),
+        };
+        let same_basename = DocumentKey {
+            project: first_project,
+            canonical_source_file: "/work/b/report.html".into(),
+        };
+        let same_source_other_project = DocumentKey {
+            project: second_project,
+            canonical_source_file: first.canonical_source_file.clone(),
+        };
+        assert_ne!(document_identity(&first), document_identity(&same_basename));
+        assert_ne!(
+            document_identity(&first),
+            document_identity(&same_source_other_project)
+        );
+        assert_ne!(
+            document_identity(&DocumentKey {
+                project: first.project.clone(),
+                canonical_source_file: "/work/a-b/report.html".into(),
+            }),
+            document_identity(&DocumentKey {
+                project: first.project.clone(),
+                canonical_source_file: "/work/a/b-report.html".into(),
+            })
+        );
+    }
 
     #[test]
     fn inspect_snapshot_correlates_selection_and_presentations() {

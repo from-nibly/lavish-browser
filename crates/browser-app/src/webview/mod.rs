@@ -81,17 +81,28 @@ impl LoadTracker {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DownloadStatus<'a> {
+    AwaitingDestination,
     Started(&'a str),
+    Progress(u8),
     Failed(&'a str),
+    Cancelled,
     Finished,
 }
 
 fn download_status_message(status: DownloadStatus<'_>) -> String {
     match status {
-        DownloadStatus::Started(destination) => format!("download started: {destination}"),
-        DownloadStatus::Failed(error) => format!("download failed: {error}"),
-        DownloadStatus::Finished => "download finished".into(),
+        DownloadStatus::AwaitingDestination => "Choose a destination for the download".into(),
+        DownloadStatus::Started(destination) => format!("Download started: {destination}"),
+        DownloadStatus::Progress(percent) => format!("Download progress: {percent}%"),
+        DownloadStatus::Failed(error) => format!("Download failed: {error}"),
+        DownloadStatus::Cancelled => "Download cancelled".into(),
+        DownloadStatus::Finished => "Download finished".into(),
     }
+}
+
+fn show_download_status(label: &gtk::Label, status: DownloadStatus<'_>) {
+    label.set_text(&download_status_message(status));
+    label.set_visible(true);
 }
 
 pub(crate) struct RetainedRegistry<K, V> {
@@ -149,7 +160,8 @@ pub struct DocumentView {
 impl DocumentView {
     pub fn new(
         url: &str,
-        accessible_name: &str,
+        identity: &str,
+        display_name: &str,
         _window: &gtk::ApplicationWindow,
         emit: Rc<dyn Fn(DocumentEvent)>,
     ) -> Rc<Self> {
@@ -157,17 +169,17 @@ impl DocumentView {
         let load_tracker = Rc::new(RefCell::new(LoadTracker::default()));
         webview.set_hexpand(true);
         webview.set_vexpand(true);
-        webview.set_widget_name(accessible_name);
+        webview.set_widget_name(&format!("document-webview-{identity}"));
         webview.update_property(&[gtk::accessible::Property::Label(&format!(
-            "Lavish document {accessible_name}"
+            "Lavish document {display_name}"
         ))]);
 
         let status = gtk::Label::new(Some("Connecting to upstream Lavish…"));
         status.set_xalign(0.0);
         status.add_css_class("dim-label");
-        status.set_widget_name(&format!("{accessible_name}-status"));
+        status.set_widget_name(&format!("document-status-{identity}"));
         status.update_property(&[gtk::accessible::Property::Label(&format!(
-            "Load status for {accessible_name}"
+            "Load status for document {display_name}"
         ))]);
 
         let content = gtk::Stack::new();
@@ -178,12 +190,17 @@ impl DocumentView {
         let failure = gtk::Box::new(gtk::Orientation::Vertical, 12);
         failure.set_halign(gtk::Align::Center);
         failure.set_valign(gtk::Align::Center);
-        failure.set_widget_name(&format!("{accessible_name}-reconnect"));
+        failure.set_widget_name(&format!("document-reconnect-placeholder-{identity}"));
         failure.update_property(&[gtk::accessible::Property::Label(&format!(
-            "Reconnect {accessible_name}"
+            "Reconnect document {display_name}"
         ))]);
         let failure_message = gtk::Label::new(Some("The Lavish session is unavailable."));
+        failure_message.set_widget_name(&format!("document-failure-message-{identity}"));
         let retry = gtk::Button::with_label("Reconnect");
+        retry.set_widget_name(&format!("document-reconnect-{identity}"));
+        retry.update_property(&[gtk::accessible::Property::Label(&format!(
+            "Reconnect document {display_name}"
+        ))]);
         {
             let webview = webview.downgrade();
             let content = content.downgrade();
@@ -203,9 +220,9 @@ impl DocumentView {
         content.add_named(&failure, Some("reconnect"));
 
         let reload = gtk::Button::with_label("Reload");
-        reload.set_widget_name(&format!("{accessible_name}-reload"));
+        reload.set_widget_name(&format!("document-reload-{identity}"));
         reload.update_property(&[gtk::accessible::Property::Label(&format!(
-            "Reload {accessible_name}"
+            "Reload document {display_name}"
         ))]);
         {
             let webview = webview.downgrade();
@@ -236,6 +253,10 @@ impl DocumentView {
                 settings.set_enable_developer_extras(true);
             }
             let inspector = gtk::Button::with_label("Inspector");
+            inspector.set_widget_name(&format!("document-inspector-{identity}"));
+            inspector.update_property(&[gtk::accessible::Property::Label(&format!(
+                "Inspect document {display_name}"
+            ))]);
             let inspect_view = webview.clone();
             inspector.connect_clicked(move |_| {
                 if let Some(inspector) = inspect_view.inspector() {
@@ -246,6 +267,7 @@ impl DocumentView {
         }
 
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        root.set_widget_name(&format!("document-surface-{identity}"));
         root.append(&toolbar);
         root.append(&content);
 
@@ -477,19 +499,23 @@ impl DocumentView {
     }
 }
 
-pub fn configure_downloads(window: &gtk::ApplicationWindow) {
+pub fn configure_downloads(window: &gtk::ApplicationWindow, status: &gtk::Label) {
     let Some(session) = webkit6::NetworkSession::default() else {
         return;
     };
     let parent = window.clone();
+    let status = status.clone();
     session.connect_download_started(move |_, download| {
+        show_download_status(&status, DownloadStatus::AwaitingDestination);
         let parent = parent.clone();
+        let chooser_status = status.clone();
         download.connect_decide_destination(move |download, suggested| {
             let dialog = gtk::FileDialog::builder()
                 .title("Save Lavish download")
                 .initial_name(suggested)
                 .build();
             let download = download.clone();
+            let chooser_status = chooser_status.clone();
             dialog.save(
                 Some(&parent),
                 None::<&gio::Cancellable>,
@@ -497,28 +523,37 @@ pub fn configure_downloads(window: &gtk::ApplicationWindow) {
                     Ok(file) => download.set_destination(&file.uri()),
                     Err(error) => {
                         download.cancel();
-                        if !error.matches(gio::IOErrorEnum::Cancelled) {
-                            eprintln!("download destination failed: {error}");
+                        if error.matches(gio::IOErrorEnum::Cancelled) {
+                            show_download_status(&chooser_status, DownloadStatus::Cancelled);
+                        } else {
+                            show_download_status(
+                                &chooser_status,
+                                DownloadStatus::Failed(&error.to_string()),
+                            );
                         }
                     }
                 },
             );
             true
         });
-        download.connect_created_destination(|_, destination| {
-            eprintln!(
-                "{}",
-                download_status_message(DownloadStatus::Started(destination))
-            );
+        let started_status = status.clone();
+        download.connect_created_destination(move |_, destination| {
+            show_download_status(&started_status, DownloadStatus::Started(destination));
         });
-        download.connect_failed(|_, error| {
-            eprintln!(
-                "{}",
-                download_status_message(DownloadStatus::Failed(&error.to_string()))
-            );
+        let progress_status = status.clone();
+        download.connect_estimated_progress_notify(move |download| {
+            let percent = (download.estimated_progress() * 100.0)
+                .round()
+                .clamp(0.0, 100.0) as u8;
+            show_download_status(&progress_status, DownloadStatus::Progress(percent));
         });
-        download.connect_finished(|_| {
-            eprintln!("{}", download_status_message(DownloadStatus::Finished));
+        let failed_status = status.clone();
+        download.connect_failed(move |_, error| {
+            show_download_status(&failed_status, DownloadStatus::Failed(&error.to_string()));
+        });
+        let finished_status = status.clone();
+        download.connect_finished(move |_| {
+            show_download_status(&finished_status, DownloadStatus::Finished);
         });
     });
 }
@@ -649,16 +684,28 @@ mod tests {
     #[test]
     fn download_statuses_are_observable_without_choosing_a_desktop_destination() {
         assert_eq!(
+            download_status_message(DownloadStatus::AwaitingDestination),
+            "Choose a destination for the download"
+        );
+        assert_eq!(
             download_status_message(DownloadStatus::Started("file:///tmp/report.pdf")),
-            "download started: file:///tmp/report.pdf"
+            "Download started: file:///tmp/report.pdf"
+        );
+        assert_eq!(
+            download_status_message(DownloadStatus::Progress(42)),
+            "Download progress: 42%"
         );
         assert_eq!(
             download_status_message(DownloadStatus::Failed("disk full")),
-            "download failed: disk full"
+            "Download failed: disk full"
+        );
+        assert_eq!(
+            download_status_message(DownloadStatus::Cancelled),
+            "Download cancelled"
         );
         assert_eq!(
             download_status_message(DownloadStatus::Finished),
-            "download finished"
+            "Download finished"
         );
     }
 
