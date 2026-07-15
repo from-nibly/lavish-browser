@@ -79,6 +79,21 @@ impl LoadTracker {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownloadStatus<'a> {
+    Started(&'a str),
+    Failed(&'a str),
+    Finished,
+}
+
+fn download_status_message(status: DownloadStatus<'_>) -> String {
+    match status {
+        DownloadStatus::Started(destination) => format!("download started: {destination}"),
+        DownloadStatus::Failed(error) => format!("download failed: {error}"),
+        DownloadStatus::Finished => "download finished".into(),
+    }
+}
+
 pub(crate) struct RetainedRegistry<K, V> {
     values: HashMap<K, V>,
 }
@@ -491,10 +506,20 @@ pub fn configure_downloads(window: &gtk::ApplicationWindow) {
             true
         });
         download.connect_created_destination(|_, destination| {
-            eprintln!("download started: {destination}");
+            eprintln!(
+                "{}",
+                download_status_message(DownloadStatus::Started(destination))
+            );
         });
-        download.connect_failed(|_, error| eprintln!("download failed: {error}"));
-        download.connect_finished(|_| eprintln!("download finished"));
+        download.connect_failed(|_, error| {
+            eprintln!(
+                "{}",
+                download_status_message(DownloadStatus::Failed(&error.to_string()))
+            );
+        });
+        download.connect_finished(|_| {
+            eprintln!("{}", download_status_message(DownloadStatus::Finished));
+        });
     });
 }
 
@@ -547,8 +572,8 @@ fn navigation_outcome(
 #[cfg(test)]
 mod tests {
     use super::{
-        DocumentEvent, LoadTracker, NavigationOutcome, RefreshAction, RetainedRegistry,
-        navigation_outcome, refresh_action,
+        DocumentEvent, DownloadStatus, LoadTracker, NavigationOutcome, RefreshAction,
+        RetainedRegistry, download_status_message, navigation_outcome, refresh_action,
     };
     use std::collections::HashSet;
 
@@ -618,6 +643,22 @@ mod tests {
         assert_eq!(
             refresh_action(SESSION, "http://127.0.0.1:9000/session/abc", true),
             RefreshAction::Navigate
+        );
+    }
+
+    #[test]
+    fn download_statuses_are_observable_without_choosing_a_desktop_destination() {
+        assert_eq!(
+            download_status_message(DownloadStatus::Started("file:///tmp/report.pdf")),
+            "download started: file:///tmp/report.pdf"
+        );
+        assert_eq!(
+            download_status_message(DownloadStatus::Failed("disk full")),
+            "download failed: disk full"
+        );
+        assert_eq!(
+            download_status_message(DownloadStatus::Finished),
+            "download finished"
         );
     }
 
