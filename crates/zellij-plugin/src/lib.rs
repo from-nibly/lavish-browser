@@ -110,6 +110,12 @@ impl LifecycleReducer {
     }
 }
 
+// `cdylib` targets do not synthesize the WASI command entry point that
+// Zellij invokes before calling the plugin exports.
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub extern "C" fn _start() {}
+
 #[cfg(target_arch = "wasm32")]
 mod plugin {
     use super::{HelperCommand, LifecycleReducer};
@@ -134,6 +140,9 @@ mod plugin {
             self.debug = configuration
                 .get("debug")
                 .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
+            if let Ok(session_name) = std::env::var("ZELLIJ_SESSION_NAME") {
+                self.reducer.set_session_name(Some(session_name));
+            }
             set_selectable(false);
             request_permission(&[
                 PermissionType::ReadApplicationState,
@@ -147,6 +156,11 @@ mod plugin {
         }
 
         fn update(&mut self, event: Event) -> bool {
+            if self.debug
+                && let Event::PermissionRequestResult(status) = &event
+            {
+                eprintln!("lavish-browser-zellij: permission {status:?}");
+            }
             let commands = match event {
                 Event::PermissionRequestResult(status) => self
                     .reducer
