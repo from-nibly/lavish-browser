@@ -621,6 +621,36 @@ impl AppController {
                 stack.set_visible_child_name(&format!("document-{index}"));
             }
         }
+        let surface = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let suspended_names = project
+            .documents
+            .iter()
+            .filter(|document| document.lifecycle == DocumentLifecycle::Suspended)
+            .map(|document| {
+                Path::new(&document.key.canonical_source_file)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(&document.key.canonical_source_file)
+            })
+            .collect::<Vec<_>>();
+        if !suspended_names.is_empty() {
+            let message = format!(
+                "Suspended: {}. Resume from the document list when needed.",
+                suspended_names.join(", ")
+            );
+            let suspended = gtk::Label::new(Some(&message));
+            suspended.set_xalign(0.0);
+            suspended.set_margin_top(6);
+            suspended.set_margin_bottom(6);
+            suspended.set_margin_start(8);
+            suspended.set_margin_end(8);
+            suspended.add_css_class("dim-label");
+            suspended.set_widget_name(&format!("project-suspended-placeholder-{identity}"));
+            suspended.update_property(&[gtk::accessible::Property::Label(&message)]);
+            surface.append(&suspended);
+        }
+        surface.append(&stack);
+
         let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
         paned.set_widget_name(&format!("project-page-{identity}"));
         paned.update_property(&[gtk::accessible::Property::Label(&format!(
@@ -629,7 +659,7 @@ impl AppController {
             project_accessible_identity(&project.key)
         ))]);
         paned.set_start_child(Some(&sidebar));
-        paned.set_end_child(Some(&stack));
+        paned.set_end_child(Some(&surface));
         paned.set_position(280);
         paned.set_resize_start_child(false);
         paned.set_shrink_start_child(false);
