@@ -295,16 +295,6 @@ def main() -> int:
         assert message_result["exit_code"] == 0 and "webdriver compatibility message" in message_result["stdout"]
         passed("message_poll", "browser message woke real lavish-axi poll")
 
-        reply_poll = poll(artifact, env, "real upstream agent reply")
-        tracked_polls.append(reply_poll)
-        wait.until(lambda d: "real upstream agent reply" in d.find_element(By.ID, "chatLog").text)
-        passed("reply_presence", "poll --agent-reply rendered in conversation while real poll remained attached")
-        driver.find_element(By.ID, "chatInput").send_keys("wake reply poll")
-        driver.find_element(By.ID, "send").click()
-        reply_result = finish(reply_poll)
-        (evidence / "poll-reply.json").write_text(json.dumps(reply_result, indent=2))
-        wait.until(lambda d: d.find_element(By.ID, "send").is_enabled())
-
         driver.switch_to.frame(driver.find_element(By.ID, "artifact"))
         driver.find_element(By.ID, "fixture-title").click()
         annotation_host = wait.until(lambda d: d.find_element(By.CSS_SELECTOR, ".lavish-annotation-root"))
@@ -338,6 +328,15 @@ def main() -> int:
         (evidence / "poll-text-range.json").write_text(json.dumps(range_result, indent=2))
         assert range_result["exit_code"] == 0 and "text range from live pointer drag" in range_result["stdout"]
         results["text_range_annotation"] = {"status": "pass", "evidence": "live pointer drag created a text-range SDK card and real poll received it", "classification": "live-gui-pointer"}
+
+        reply_poll = poll(artifact, env, "real upstream agent reply")
+        tracked_polls.append(reply_poll)
+        wait.until(lambda d: "real upstream agent reply" in d.find_element(By.ID, "chatLog").text)
+        passed("reply_presence", "poll --agent-reply rendered in conversation while real poll remained attached")
+        driver.find_element(By.ID, "chatInput").send_keys("wake reply poll")
+        driver.find_element(By.ID, "send").click()
+        reply_result = finish(reply_poll)
+        (evidence / "poll-reply.json").write_text(json.dumps(reply_result, indent=2))
 
         original = artifact.read_text()
         artifact.write_text(original.replace("live-reload validation", "live-reload observed"))
