@@ -1,6 +1,9 @@
+#[path = "memory.rs"]
+mod memory;
 #[path = "webview/mod.rs"]
 mod webview;
 
+use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
 use lavish_browser_control::{SocketServer, default_socket_path};
@@ -79,6 +82,7 @@ struct AppController {
     rendering: Cell<bool>,
     presentation_count: Cell<u64>,
     document_views: RefCell<webview::RetainedRegistry<DocumentKey, Rc<webview::DocumentView>>>,
+    memory_monitor: gio::MemoryMonitor,
 }
 
 impl AppController {
@@ -133,10 +137,93 @@ impl AppController {
             rendering: Cell::new(false),
             presentation_count: Cell::new(0),
             document_views: RefCell::new(webview::RetainedRegistry::default()),
+            memory_monitor: gio::MemoryMonitor::dup_default(),
         });
         controller.connect_notebook_selection();
+        controller.connect_memory_monitor();
         controller.start_control_server()?;
         Ok(controller)
+    }
+
+    fn connect_memory_monitor(self: &Rc<Self>) {
+        use gio::prelude::MemoryMonitorExt;
+
+        let weak = Rc::downgrade(self);
+        self.memory_monitor
+            .connect_low_memory_warning(move |_, level| {
+                let Some(controller) = weak.upgrade() else {
+                    return;
+                };
+                let level = match level {
+                    gio::MemoryMonitorWarningLevel::Low => memory::WarningLevel::Low,
+                    gio::MemoryMonitorWarningLevel::Medium => memory::WarningLevel::Medium,
+                    gio::MemoryMonitorWarningLevel::Critical => memory::WarningLevel::Critical,
+                    _ => memory::WarningLevel::Critical,
+                };
+                controller.handle_memory_warning(level, "GIO MemoryMonitor");
+            });
+
+        let Some(path) = std::env::var_os("LAVISH_BROWSER_MEMORY_WARNING_FILE") else {
+            return;
+        };
+        let mut previous = String::new();
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_local(Duration::from_millis(100), move || {
+            let Some(controller) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let Ok(contents) = std::fs::read_to_string(&path) else {
+                return glib::ControlFlow::Continue;
+            };
+            if contents == previous {
+                return glib::ControlFlow::Continue;
+            }
+            previous.clone_from(&contents);
+            let warning = contents
+                .split_whitespace()
+                .next_back()
+                .and_then(memory::WarningLevel::parse);
+            if let Some(warning) = warning {
+                controller.handle_memory_warning(warning, "deterministic test hook");
+            } else if !contents.trim().is_empty() {
+                eprintln!(
+                    "ignored invalid memory warning hook value; expected low, medium, or critical"
+                );
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
+    fn handle_memory_warning(self: &Rc<Self>, level: memory::WarningLevel, source: &str) {
+        let candidates = {
+            let model = self.model.borrow();
+            let views = self.document_views.borrow();
+            memory::suspension_candidates(&model, level, |key| views.contains_key(key))
+        };
+        if candidates.is_empty() {
+            eprintln!("{source} warning {level:?}: no inactive materialized document to suspend");
+            return;
+        }
+        let candidate_set: HashSet<_> = candidates.iter().cloned().collect();
+        eprintln!(
+            "{source} warning {level:?}: suspending {} inactive document(s)",
+            candidates.len()
+        );
+        self.mutate(|model| {
+            let mut changed = false;
+            for document in model
+                .projects
+                .iter_mut()
+                .flat_map(|project| &mut project.documents)
+            {
+                if candidate_set.contains(&document.key) {
+                    document.lifecycle = DocumentLifecycle::Suspended;
+                    document.load_error = None;
+                    changed = true;
+                }
+            }
+            changed
+        });
     }
 
     fn connect_notebook_selection(self: &Rc<Self>) {
@@ -358,6 +445,7 @@ impl AppController {
                 project
                     .documents
                     .iter()
+                    .filter(|document| document.lifecycle != DocumentLifecycle::Suspended)
                     .map(|document| document.key.clone())
             })
             .collect();
