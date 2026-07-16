@@ -303,6 +303,7 @@ def main() -> int:
         driver.find_element(By.ID, "send").click()
         reply_result = finish(reply_poll)
         (evidence / "poll-reply.json").write_text(json.dumps(reply_result, indent=2))
+        wait.until(lambda d: d.find_element(By.ID, "send").is_enabled())
 
         driver.switch_to.frame(driver.find_element(By.ID, "artifact"))
         driver.find_element(By.ID, "fixture-title").click()
@@ -314,6 +315,7 @@ def main() -> int:
         annotation_poll = poll(artifact, env)
         tracked_polls.append(annotation_poll)
         time.sleep(1)
+        wait.until(lambda d: d.find_element(By.ID, "send").is_enabled())
         driver.find_element(By.ID, "send").click()
         annotation_result = finish(annotation_poll)
         (evidence / "poll-annotation.json").write_text(json.dumps(annotation_result, indent=2))
@@ -330,6 +332,7 @@ def main() -> int:
         range_poll = poll(artifact, env)
         tracked_polls.append(range_poll)
         time.sleep(1)
+        wait.until(lambda d: d.find_element(By.ID, "send").is_enabled())
         driver.find_element(By.ID, "send").click()
         range_result = finish(range_poll)
         (evidence / "poll-text-range.json").write_text(json.dumps(range_result, indent=2))
