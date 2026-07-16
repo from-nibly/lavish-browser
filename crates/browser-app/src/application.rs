@@ -195,11 +195,28 @@ impl AppController {
     }
 
     fn handle_memory_warning(self: &Rc<Self>, level: memory::WarningLevel, source: &str) {
-        let candidates = {
+        let (candidates, materialized_lru) = {
             let model = self.model.borrow();
             let views = self.document_views.borrow();
-            memory::suspension_candidates(&model, level, |key| views.contains_key(key))
+            let materialized_lru = model
+                .inactive_documents_lru()
+                .into_iter()
+                .filter(|document| views.contains_key(&document.key))
+                .map(|document| {
+                    format!(
+                        "{}@{}",
+                        document.key.canonical_source_file, document.last_activated_at
+                    )
+                })
+                .collect::<Vec<_>>();
+            let candidates =
+                memory::suspension_candidates(&model, level, |key| views.contains_key(key));
+            (candidates, materialized_lru)
         };
+        eprintln!(
+            "{source} warning {level:?}: materialized inactive LRU [{}]",
+            materialized_lru.join(", ")
+        );
         if candidates.is_empty() {
             eprintln!("{source} warning {level:?}: no inactive materialized document to suspend");
             return;
