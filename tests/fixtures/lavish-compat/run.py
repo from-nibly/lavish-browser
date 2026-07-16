@@ -427,12 +427,21 @@ def main() -> int:
                 observation.get("feedback_queued") is True,
             ])
             if observed_pass:
-                manual_poll_result = finish(manual_poll, timeout=60)
-                (evidence / "poll-whiteboard-manual.json").write_text(json.dumps(manual_poll_result, indent=2))
-                if (
-                    manual_poll_result["exit_code"] == 0
-                    and "manual Excalidraw persistence confirmation" in manual_poll_result["stdout"]
-                ):
+                matching_poll = None
+                for poll_attempt in range(1, 4):
+                    manual_poll_result = finish(manual_poll, timeout=60)
+                    (evidence / f"poll-whiteboard-manual-{poll_attempt}.json").write_text(
+                        json.dumps(manual_poll_result, indent=2)
+                    )
+                    if (
+                        manual_poll_result["exit_code"] == 0
+                        and "manual Excalidraw persistence confirmation" in manual_poll_result["stdout"]
+                    ):
+                        matching_poll = manual_poll_result
+                        break
+                    manual_poll = poll(artifact, manual_env)
+                    tracked_polls.append(manual_poll)
+                if matching_poll is not None:
                     results["excalidraw"] = {
                         "status": "pass",
                         "evidence": "human observed edit persistence after reload and real owned poll received queued whiteboard feedback",
@@ -441,7 +450,7 @@ def main() -> int:
                 else:
                     results["excalidraw"] = {
                         "status": "blocked",
-                        "evidence": "human observation passed but the owned real poll did not return matching whiteboard feedback",
+                        "evidence": "human observation passed but three bounded owned polls did not return matching whiteboard feedback",
                         "classification": "manual-live",
                     }
             else:

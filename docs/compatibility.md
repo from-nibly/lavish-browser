@@ -81,6 +81,16 @@ pointer attempt reached the real editor, but the automated canvas gesture was
 not accepted faithfully enough to queue feedback. No Lavish API or internals
 were used as a substitute.
 
+A later human residual run is retained at
+`target/compatibility/evidence/manual-residual-5/`. The user visibly drew and
+attempted to queue the whiteboard, but persistence after reload was not
+observed. The owned real poll returned only the unrelated freeform message
+`lavish-webkit-compatibility-fixture\n\ndoes this work?`; a second real poll
+found no queued whiteboard feedback, and the live whiteboard note field was
+empty. The matrix therefore correctly remains `BLOCKED`. Interactive mode now
+retains and re-arms up to three bounded owned polls so unrelated feedback cannot
+consume the sole whiteboard evidence waiter in a future residual run.
+
 ## Capability matrix
 
 | Capability | Result | Evidence |
