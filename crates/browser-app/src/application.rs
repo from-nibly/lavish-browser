@@ -454,7 +454,10 @@ impl AppController {
             eprintln!("released {released_views} retained document view(s)");
         }
         for project in &model.projects {
-            let page = self.project_page(project);
+            let page = self.project_page(
+                project,
+                model.selected_project.as_ref() == Some(&project.key),
+            );
             let tab = self.project_tab(project);
             self.notebook.append_page(&page, Some(&tab));
         }
@@ -507,7 +510,11 @@ impl AppController {
         tab
     }
 
-    fn project_page(self: &Rc<Self>, project: &lavish_browser_core::Project) -> gtk::Paned {
+    fn project_page(
+        self: &Rc<Self>,
+        project: &lavish_browser_core::Project,
+        globally_selected: bool,
+    ) -> gtk::Paned {
         let identity = project_identity(&project.key);
         let list = gtk::ListBox::new();
         list.set_selection_mode(gtk::SelectionMode::Single);
@@ -580,7 +587,11 @@ impl AppController {
         } else {
             for (index, document) in project.documents.iter().enumerate() {
                 stack.add_named(
-                    &self.document_surface(document, project.selected_document.as_deref()),
+                    &self.document_surface(
+                        document,
+                        globally_selected,
+                        project.selected_document.as_deref(),
+                    ),
                     Some(&format!("document-{index}")),
                 );
             }
@@ -611,13 +622,22 @@ impl AppController {
     fn document_surface(
         self: &Rc<Self>,
         document: &lavish_browser_core::Document,
+        project_is_globally_selected: bool,
         selected_source: Option<&str>,
     ) -> gtk::Widget {
-        let selected = selected_source == Some(&document.key.canonical_source_file);
-        if selected || self.document_views.borrow().contains_key(&document.key) {
-            return self.document_view(document).widget();
+        let document_is_locally_selected =
+            selected_source == Some(&document.key.canonical_source_file);
+        let already_materialized = self.document_views.borrow().contains_key(&document.key);
+        match memory::materialization_plan(
+            project_is_globally_selected,
+            document_is_locally_selected,
+            already_materialized,
+        ) {
+            memory::MaterializationPlan::Create | memory::MaterializationPlan::Reuse => {
+                self.document_view(document).widget()
+            }
+            memory::MaterializationPlan::Placeholder => document_placeholder(document, self),
         }
-        document_placeholder(document, self)
     }
 
     fn document_view(

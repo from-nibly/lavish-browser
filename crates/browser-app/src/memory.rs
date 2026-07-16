@@ -26,6 +26,27 @@ impl WarningLevel {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MaterializationPlan {
+    Placeholder,
+    Create,
+    Reuse,
+}
+
+pub(crate) fn materialization_plan(
+    project_is_globally_selected: bool,
+    document_is_locally_selected: bool,
+    already_materialized: bool,
+) -> MaterializationPlan {
+    if already_materialized {
+        MaterializationPlan::Reuse
+    } else if project_is_globally_selected && document_is_locally_selected {
+        MaterializationPlan::Create
+    } else {
+        MaterializationPlan::Placeholder
+    }
+}
+
 pub(crate) fn suspension_candidates(
     model: &BrowserModel,
     warning: WarningLevel,
@@ -42,7 +63,7 @@ pub(crate) fn suspension_candidates(
 
 #[cfg(test)]
 mod tests {
-    use super::{WarningLevel, suspension_candidates};
+    use super::{MaterializationPlan, WarningLevel, materialization_plan, suspension_candidates};
     use lavish_browser_core::{BrowserModel, DocumentKey};
     use lavish_browser_protocol::{ProjectKey, ProjectMetadata};
     use std::collections::HashSet;
@@ -136,6 +157,88 @@ mod tests {
             suspension_candidates(&model, WarningLevel::Critical, |key| materialized
                 .contains(key)),
             vec![key(1, "/tmp/middle.html")]
+        );
+    }
+
+    fn three_project_model() -> BrowserModel {
+        let mut model = BrowserModel::default();
+        model.open_url(
+            project(1),
+            "/tmp/one.html",
+            "http://localhost/session/one",
+            10,
+        );
+        model.open_url(
+            project(2),
+            "/tmp/two.html",
+            "http://localhost/session/two",
+            20,
+        );
+        model.open_url(
+            project(3),
+            "/tmp/three.html",
+            "http://localhost/session/three",
+            30,
+        );
+        model
+    }
+
+    fn controller_render_plans(
+        model: &BrowserModel,
+        materialized: &HashSet<DocumentKey>,
+    ) -> Vec<(DocumentKey, MaterializationPlan)> {
+        model
+            .projects
+            .iter()
+            .flat_map(|project| {
+                project.documents.iter().map(|document| {
+                    let plan = materialization_plan(
+                        model.selected_project.as_ref() == Some(&project.key),
+                        project.selected_document.as_deref()
+                            == Some(&document.key.canonical_source_file),
+                        materialized.contains(&document.key),
+                    );
+                    (document.key.clone(), plan)
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn inactive_project_suspended_views_stay_absent_across_controller_renders() {
+        let model = three_project_model();
+        let materialized = HashSet::from([key(3, "/tmp/three.html")]);
+        let expected = vec![
+            (key(1, "/tmp/one.html"), MaterializationPlan::Placeholder),
+            (key(2, "/tmp/two.html"), MaterializationPlan::Placeholder),
+            (key(3, "/tmp/three.html"), MaterializationPlan::Reuse),
+        ];
+
+        for _ in 0..3 {
+            assert_eq!(controller_render_plans(&model, &materialized), expected);
+        }
+    }
+
+    #[test]
+    fn selecting_suspended_project_creates_exactly_one_view_and_then_reuses_it() {
+        let mut model = three_project_model();
+        let mut materialized = HashSet::from([key(3, "/tmp/three.html")]);
+        assert!(model.select_project(&project(1).key, 40));
+
+        let plans = controller_render_plans(&model, &materialized);
+        assert_eq!(
+            plans
+                .iter()
+                .filter(|(_, plan)| *plan == MaterializationPlan::Create)
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>(),
+            vec![key(1, "/tmp/one.html")]
+        );
+        materialized.insert(key(1, "/tmp/one.html"));
+        assert!(
+            controller_render_plans(&model, &materialized)
+                .iter()
+                .all(|(_, plan)| *plan != MaterializationPlan::Create)
         );
     }
 
