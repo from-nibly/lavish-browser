@@ -46,8 +46,10 @@ def active_window(env: dict[str, str]) -> str:
 
 
 def terminal_command(session: str, command: str, env: dict[str, str]) -> None:
-    run(["zellij", "--session", session, "action", "write-chars", command], env)
-    run(["zellij", "--session", session, "action", "write", "13"], env)
+    run([
+        "zellij", "--session", session, "action", "new-pane", "--close-on-exit",
+        "--", "bash", "-lc", command,
+    ], env)
 
 
 def main() -> int:
