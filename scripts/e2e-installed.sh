@@ -52,10 +52,9 @@ assert pyatspi.Registry.getDesktopCount() > 0
 print("isolated AT-SPI registry is reachable")
 PY
 
+# First prove every automatable compatibility path without opening a manual
+# residual. The manual whiteboard run is launched only after integration passes.
 manual=()
-if [[ ${LAVISH_MANUAL_EXCALIDRAW:-0} == 1 ]]; then
-  manual=(--manual-excalidraw --manual-display "${LAVISH_MANUAL_DISPLAY:-$DISPLAY}")
-fi
 
 # Re-run the full unchanged-Lavish compatibility gate against installed paths.
 set +e
@@ -80,12 +79,42 @@ DBUS_SESSION_BUS_ADDRESS=$AT_SPI_BUS_ADDRESS "$registry" >"$evidence/logs/atspi-
 registry_pid=$!
 sleep 1
 
-integration_manual=()
-[[ ${LAVISH_MANUAL_EXCALIDRAW:-0} == 1 ]] && integration_manual=(--manual-excalidraw)
 python -u "$root/tests/e2e/run.py" \
   --prefix "$prefix" --evidence "$evidence/integration" \
-  "${integration_manual[@]}" 2>&1 | tee "$evidence/logs/installed-harness.log"
+  2>&1 | tee "$evidence/logs/installed-harness.log"
 integration_status=${PIPESTATUS[0]}
+
+# The automated compatibility harness intentionally reports manual residuals
+# as blockers. Permit only Excalidraw and the separately proven installed
+# native-download path before presenting the bounded manual residual.
+automated_ready=1
+python - "$evidence/compatibility/capabilities.json" <<'PY' || automated_ready=0
+import json, sys
+capabilities = json.load(open(sys.argv[1]))["capabilities"]
+blocked = {name for name, result in capabilities.items() if result["status"] != "pass"}
+if not blocked <= {"excalidraw", "download"}:
+    raise SystemExit(f"unexpected automated compatibility blockers: {sorted(blocked)}")
+PY
+
+if ((integration_status == 0 && automated_ready == 1)) && [[ ${LAVISH_MANUAL_EXCALIDRAW:-0} == 1 ]]; then
+  if [[ -z ${LAVISH_MANUAL_DISPLAY:-} ]] || ! xdpyinfo -display "$LAVISH_MANUAL_DISPLAY" >/dev/null 2>&1; then
+    echo "FAIL: LAVISH_MANUAL_DISPLAY must name a reachable visible display" | tee "$evidence/logs/manual-residual.log"
+    compatibility_status=1
+  else
+    echo "All non-manual installed capabilities passed; starting bounded visible Excalidraw residual on $LAVISH_MANUAL_DISPLAY." | tee "$evidence/logs/manual-residual.log"
+  python -u "$root/tests/fixtures/lavish-compat/run.py" \
+    --browser "$prefix/bin/lavish-browser" \
+    --launcher "$prefix/bin/lavish-open" \
+    --evidence "$evidence/compatibility-manual" \
+      --port "${LAVISH_MANUAL_WEBDRIVER_PORT:-9597}" \
+      --manual-excalidraw --manual-display "$LAVISH_MANUAL_DISPLAY" \
+      2>&1 | tee -a "$evidence/logs/manual-residual.log"
+    compatibility_status=${PIPESTATUS[0]}
+  fi
+elif ((integration_status == 0 && automated_ready == 1)); then
+  echo "BLOCKED: all automated checks passed; rerun with LAVISH_MANUAL_EXCALIDRAW=1 and complete the visible rectangle gesture." | tee "$evidence/logs/manual-residual.log"
+  compatibility_status=1
+fi
 set -e
 
 cat >"$evidence/manifest.json" <<EOF

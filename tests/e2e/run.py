@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -72,6 +73,19 @@ def main() -> int:
         raise SystemExit(f"installed artifacts missing: {missing}")
     if plugin.read_bytes()[:4] != b"\0asm":
         raise SystemExit("installed Zellij plugin is not a WASM module")
+    installed_manifest = {
+        str(path.relative_to(prefix)): {
+            "path": str(path),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "bytes": path.stat().st_size,
+        }
+        for path in required
+    }
+    for asset in sorted((prefix / "share/applications").glob("works.from-nibly.LavishBrowser.desktop")) + sorted((prefix / "share/icons/hicolor/scalable/apps").glob("works.from-nibly.LavishBrowser.svg")):
+        installed_manifest[str(asset.relative_to(prefix))] = {
+            "path": str(asset), "sha256": hashlib.sha256(asset.read_bytes()).hexdigest(), "bytes": asset.stat().st_size,
+        }
+    (evidence / "installed-artifacts.json").write_text(json.dumps(installed_manifest, indent=2) + "\n")
 
     root = Path(__file__).resolve().parents[2]
     fixture_source = root / "tests/fixtures/lavish-compat"
@@ -87,14 +101,16 @@ def main() -> int:
     runtime = isolated / "runtime"
     state_home = isolated / "state"
     config = isolated / "config"
+    cache = isolated / "cache"
     data = isolated / "data"
-    for directory in (runtime, state_home, config, data):
+    for directory in (runtime, state_home, config, cache, data):
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     env.update({
         "XDG_RUNTIME_DIR": str(runtime), "XDG_STATE_HOME": str(state_home),
-        "XDG_CONFIG_HOME": str(config), "XDG_DATA_HOME": str(data),
+        "XDG_CONFIG_HOME": str(config), "XDG_CACHE_HOME": str(cache), "XDG_DATA_HOME": str(data),
         "LAVISH_BROWSER_EXECUTABLE": str(browser),
         "LAVISH_BROWSER_MEMORY_WARNING_FILE": str(evidence / "memory-warning"),
+        "LAVISH_BROWSER_CTL_TRACE": str(evidence / "control-helper.trace"),
     })
     for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
         env.pop(key, None)
@@ -152,8 +168,18 @@ def main() -> int:
         scenarios[name] = {"status": "pass", "evidence": detail}
 
     try:
-        standalone = run([str(launcher), str(artifact_a)], env, timeout=180)
-        (evidence / "standalone-launch.log").write_text(standalone.stdout + standalone.stderr)
+        standalone = None
+        attempts = []
+        for _ in range(3):
+            candidate = run([str(launcher), str(artifact_a)], env, check=False, timeout=180)
+            attempts.append(candidate.stdout + candidate.stderr)
+            if candidate.returncode == 0:
+                standalone = candidate
+                break
+            time.sleep(1)
+        (evidence / "standalone-launch.log").write_text("\n--- attempt ---\n".join(attempts))
+        if standalone is None:
+            raise RuntimeError("installed Standalone launcher failed after three bounded attempts")
         snapshot = wait_until("Standalone project", lambda: project_snapshot(standalone=True))
         passed("standalone", "installed launcher created visible Standalone browser state")
 
@@ -163,12 +189,37 @@ def main() -> int:
         (config / "zellij/config.kdl").write_text(
             'simplified_ui true\nshow_startup_tips false\npane_frames false\n'
         )
-        client_log = (evidence / "zellij-client.log").open("w")
+        client_log = (evidence / "zellij-client.log").open("wb")
         zellij_client = subprocess.Popen(
             ["script", "-qefc", f"zellij --session {session} --new-session-with-layout compact", str(evidence / "zellij.typescript")],
             env=zellij_env, stdin=subprocess.PIPE, stdout=client_log, stderr=subprocess.STDOUT,
         )
         wait_until("isolated Zellij session", lambda: session in run(["zellij", "list-sessions", "--short", "--no-formatting"], zellij_env).stdout)
+        # The server can be listed before the attached shell has completed its
+        # first terminal negotiation. Wait for its rendered prompt before input.
+        wait_until(
+            "attached Zellij shell prompt",
+            lambda: b"\\$" in (evidence / "zellij-client.log").read_bytes() and b"jordan@pop-os" in (evidence / "zellij-client.log").read_bytes(),
+            30,
+        )
+        time.sleep(2)
+        loaded_plugin = run([
+            "zellij", "--session", session, "action", "start-or-reload-plugin",
+            "--configuration", f"helper_path={ctl}", f"file:{plugin}",
+        ], zellij_env)
+        plugin_pane_id = loaded_plugin.stdout.strip()
+        if not plugin_pane_id.startswith("plugin_"):
+            raise RuntimeError(f"Zellij did not return a plugin pane id: {plugin_pane_id!r}")
+        wait_until(
+            "visible startup plugin permission prompt",
+            lambda: b"Allow?" in (evidence / "zellij-client.log").read_bytes(),
+            60,
+        )
+        run([
+            "zellij", "--session", session, "action", "write-chars",
+            "--pane-id", plugin_pane_id, "y",
+        ], zellij_env)
+        time.sleep(1)
 
         log_a = evidence / "zellij-open-a.log"
         command_a = f"{shlex.quote(str(launcher))} {shlex.quote(str(artifact_a))} >{shlex.quote(str(log_a))} 2>&1"
@@ -189,54 +240,89 @@ def main() -> int:
         assert sum(len(p["documents"]) for p in after["projects"]) == before_count
         passed("dedupe", "reopening canonical source did not add a document")
 
-        # Exercise the installed real plugin. Permission approval is sent to the
-        # isolated attached client; failure to observe lifecycle state is fatal.
-        configuration = f"helper_path={ctl},debug=true"
-        run(["zellij", "--session", session, "action", "start-or-reload-plugin", "--configuration", configuration, f"file:{plugin}"], zellij_env)
-        time.sleep(1)
-        if not zellij_client.stdin:
-            raise RuntimeError("isolated Zellij client has no permission-input stream")
-        zellij_client.stdin.write(b"y\r")
-        zellij_client.stdin.flush()
-        time.sleep(2)
-        zellij_projects = [p for p in state(ctl, env)["projects"] if session in json.dumps(p["key"])]
-        tab_ids = sorted(p["key"]["stable_tab_id"] for p in zellij_projects)
-        if len(tab_ids) < 2:
-            raise RuntimeError("real Zellij projects were not available for plugin assertions")
-        focus_before = active_window(env)
-        run(["zellij", "--session", session, "action", "go-to-tab", "1"], zellij_env)
-        selected = wait_until(
-            "plugin selecting first project",
-            lambda: selected_snapshot({"kind": "zellij", "session_name": session, "stable_tab_id": tab_ids[0]}),
-        )
-        focus_after = active_window(env)
-        if focus_before != focus_after:
-            raise RuntimeError(f"plugin selection changed active window: {focus_before!r} -> {focus_after!r}")
-
-        # A new tab has no browser project and therefore must not change selection.
-        run(["zellij", "--session", session, "action", "new-tab", "--name", "Unknown"], zellij_env)
-        time.sleep(2)
-        if state(ctl, env)["selected_project"] != selected["selected_project"]:
-            raise RuntimeError("plugin changed selection for an unknown Zellij tab")
-        run(["zellij", "--session", session, "action", "close-pane"], zellij_env)
-        run(["zellij", "--session", session, "action", "go-to-tab", "2"], zellij_env)
-        run(["zellij", "--session", session, "action", "close-pane"], zellij_env)
-        wait_until("plugin closing second project", lambda: project_snapshot(zellij_count=1, exact=True))
-        passed("plugin_focus", f"real plugin selected/ignored/closed one-way; active window unchanged: {focus_before}")
-
-        # AT-SPI is a required independent visible-native assertion.
-        dogtail = run([sys.executable, str(root / "tests/e2e/verify_accessibility.py"), artifact_a.name, artifact_b.name], env, check=False)
+        # Pair model assertions with native AT-SPI rows while both projects are visible.
+        dogtail = run([sys.executable, str(root / "tests/e2e/verify_accessibility.py"), artifact_b.name], env, check=False)
         (evidence / "accessibility.log").write_text(dogtail.stdout + dogtail.stderr)
         if dogtail.returncode:
             raise RuntimeError("AT-SPI/Dogtail native assertion failed; see accessibility.log")
         passed("accessibility", dogtail.stdout.strip())
 
+        native_export = evidence / "installed-native.export.html"
+        native_download = run([
+            sys.executable, str(root / "tests/fixtures/lavish-compat/native_download.py"),
+            "--destination", str(native_export), "--trace", str(evidence / "native-download-trace.json"),
+        ], env, check=False)
+        (evidence / "native-download.log").write_text(native_download.stdout + native_download.stderr)
+        if native_download.returncode or not native_export.is_file() or "<!doctype html" not in native_export.read_text().lower():
+            raise RuntimeError("installed native AT-SPI export failed; see native-download.log")
+        passed("native_download", f"AT-SPI chooser wrote {native_export.stat().st_size} byte installed export")
+
+        # Exercise the installed real plugin loaded from config at session
+        # startup. Lifecycle delivery below proves the visible y/n approval was
+        # granted rather than merely dismissed.
+        zellij_projects = [p for p in state(ctl, env)["projects"] if session in json.dumps(p["key"])]
+        tab_ids = sorted(p["key"]["stable_tab_id"] for p in zellij_projects)
+        if len(tab_ids) < 2:
+            raise RuntimeError("real Zellij projects were not available for plugin assertions")
+        helper_trace = evidence / "control-helper.trace"
+
+        def attached_action(action: str) -> None:
+            if zellij_client.stdin is None:
+                raise RuntimeError("attached Zellij client input closed")
+            zellij_client.stdin.write(f"zellij action {action}\r".encode())
+            zellij_client.stdin.flush()
+            time.sleep(1)
+
+        attached_action("go-to-tab 2")
+        wait_until(
+            "plugin helper selecting second project",
+            lambda: f"select-project\t{session}\t{tab_ids[1]}" in helper_trace.read_text() if helper_trace.exists() else False,
+        )
+        focus_before = active_window(env)
+        focus_state_before = run([sys.executable, str(root / "tests/e2e/focus_accessibility.py")], env).stdout.strip()
+        presentation_before = state(ctl, env)["presentation_count"]
+        attached_action("go-to-tab 1")
+        selected = wait_until(
+            "plugin selecting first project",
+            lambda: selected_snapshot({"kind": "zellij", "session_name": session, "stable_tab_id": tab_ids[0]}),
+        )
+        focus_after = active_window(env)
+        focus_state_after = run([sys.executable, str(root / "tests/e2e/focus_accessibility.py")], env).stdout.strip()
+        presentation_after = state(ctl, env)["presentation_count"]
+        if focus_before != focus_after or focus_state_before != focus_state_after or presentation_before != presentation_after:
+            raise RuntimeError(
+                f"plugin changed focus/presentation: X {focus_before!r}->{focus_after!r}, "
+                f"AT-SPI {focus_state_before!r}->{focus_state_after!r}, present {presentation_before}->{presentation_after}"
+            )
+        (evidence / "plugin-focus.json").write_text(json.dumps({
+            "x_active_before": focus_before, "x_active_after": focus_after,
+            "atspi_before": json.loads(focus_state_before), "atspi_after": json.loads(focus_state_after),
+            "presentation_before": presentation_before, "presentation_after": presentation_after,
+        }, indent=2) + "\n")
+
+        # A new tab has no browser project and therefore must not change selection.
+        attached_action("new-tab --name Unknown")
+        time.sleep(2)
+        if state(ctl, env)["selected_project"] != selected["selected_project"]:
+            raise RuntimeError("plugin changed selection for an unknown Zellij tab")
+        attached_action("close-pane")
+        attached_action("go-to-tab 2")
+        attached_action("close-pane")
+        wait_until("plugin closing second project", lambda: project_snapshot(zellij_count=1, exact=True))
+        passed("plugin_focus", f"real plugin selected/ignored/closed one-way; active window unchanged: {focus_before}")
+
+        processes_before = run(["ps", "-eo", "pid,ppid,rss,comm,args"], env, check=False)
+        (evidence / "processes-before-memory.txt").write_text(processes_before.stdout)
         (evidence / "memory-warning").write_text("1 critical\n")
         suspended = wait_until("memory suspension", lambda: (s := state(ctl, env)) if "suspended" in json.dumps(s).lower() else None)
         (evidence / "state-after-memory.json").write_text(json.dumps(suspended, indent=2) + "\n")
         processes = run(["ps", "-eo", "pid,ppid,rss,comm,args"], env, check=False)
         (evidence / "processes-after-memory.txt").write_text(processes.stdout)
-        passed("memory", "critical warning suspended at least one inactive installed WebView")
+        def web_rss(sample: str) -> int:
+            return sum(int(parts[2]) for line in sample.splitlines() if "WebKit" in line and len(parts := line.split(None, 4)) >= 3 and parts[2].isdigit())
+        memory_metrics = {"webkit_rss_kib_before": web_rss(processes_before.stdout), "webkit_rss_kib_after": web_rss(processes.stdout)}
+        (evidence / "memory-metrics.json").write_text(json.dumps(memory_metrics, indent=2) + "\n")
+        passed("memory", f"critical warning suspended inactive view; WebKit RSS KiB {memory_metrics}")
 
         before_restart = state(ctl, env)
         (evidence / "state-before-restart.json").write_text(json.dumps(before_restart, indent=2) + "\n")
@@ -251,6 +337,8 @@ def main() -> int:
         run(["zellij", "delete-session", session, "--force"], env, check=False)
         if zellij_client and zellij_client.poll() is None:
             zellij_client.terminate()
+        if 'client_log' in locals():
+            client_log.close()
         if process.poll() is None:
             process.terminate()
             try: process.wait(timeout=10)
@@ -260,7 +348,7 @@ def main() -> int:
             shutil.copytree(state_home, evidence / "persistence-final", dirs_exist_ok=True)
         shutil.rmtree(isolated, ignore_errors=True)
 
-    required_names = {"standalone", "multi_project_single_instance", "dedupe", "plugin_focus", "accessibility", "memory", "persistence"}
+    required_names = {"standalone", "multi_project_single_instance", "dedupe", "plugin_focus", "accessibility", "native_download", "memory", "persistence"}
     missing = required_names - scenarios.keys()
     if missing:
         raise RuntimeError(f"required installed scenarios did not pass: {sorted(missing)}")

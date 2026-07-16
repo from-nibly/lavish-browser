@@ -8,18 +8,25 @@ expected = sys.argv[1:]
 
 
 def walk(node, depth=0):
+    if node is None or depth > 128:
+        return
     try:
         yield node
         for index in range(node.childCount):
             yield from walk(node.getChildAtIndex(index), depth + 1)
-    except (LookupError, RuntimeError):
+    except (AttributeError, LookupError, RuntimeError):
         return
 
 
 def snapshot():
     desktop = pyatspi.Registry.getDesktop(0)
-    nodes = list(walk(desktop))
-    names = [node.name for node in nodes if getattr(node, "name", "")]
+    names = []
+    for node in walk(desktop):
+        try:
+            if name := node.name:
+                names.append(name)
+        except Exception:
+            continue
     return names
 
 
@@ -28,8 +35,9 @@ names = []
 while time.monotonic() < deadline:
     names = snapshot()
     joined = "\n".join(names)
-    if "Lavish projects" in joined and all(name in joined for name in expected):
-        print(f"AT-SPI exposed Lavish projects and document rows: {', '.join(expected)}")
+    project_tabs = sum(name.startswith("Project ") and "Close project" in name for name in names)
+    if "Lavish projects" in joined and project_tabs >= 3 and all(name in joined for name in expected):
+        print(f"AT-SPI exposed {project_tabs} project tabs and active document rows: {', '.join(expected)}")
         raise SystemExit(0)
     time.sleep(.25)
 
