@@ -143,7 +143,6 @@ mod plugin {
             if let Ok(session_name) = std::env::var("ZELLIJ_SESSION_NAME") {
                 self.reducer.set_session_name(Some(session_name));
             }
-            set_selectable(false);
             request_permission(&[
                 PermissionType::ReadApplicationState,
                 PermissionType::RunCommands,
@@ -156,15 +155,17 @@ mod plugin {
         }
 
         fn update(&mut self, event: Event) -> bool {
-            if self.debug
-                && let Event::PermissionRequestResult(status) = &event
-            {
-                eprintln!("lavish-browser-zellij: permission {status:?}");
+            if self.debug {
+                self.trace_event(&event);
             }
             let commands = match event {
-                Event::PermissionRequestResult(status) => self
-                    .reducer
-                    .set_permission(status == PermissionStatus::Granted),
+                Event::PermissionRequestResult(status) => {
+                    if status == PermissionStatus::Granted {
+                        set_selectable(false);
+                    }
+                    self.reducer
+                        .set_permission(status == PermissionStatus::Granted)
+                }
                 Event::ModeUpdate(mode) => self.reducer.set_session_name(mode.session_name),
                 Event::TabUpdate(tabs) => {
                     let active = tabs
@@ -187,6 +188,24 @@ mod plugin {
     }
 
     impl Plugin {
+        fn trace_event(&self, event: &Event) {
+            let detail = match event {
+                Event::PermissionRequestResult(status) => format!("permission={status:?}"),
+                Event::ModeUpdate(mode) => format!("mode session={:?}", mode.session_name),
+                Event::TabUpdate(tabs) => format!(
+                    "tabs={:?}",
+                    tabs.iter()
+                        .map(|tab| (tab.tab_id, tab.active, tab.name.as_str()))
+                        .collect::<Vec<_>>()
+                ),
+                _ => return,
+            };
+            run_command(
+                &[&self.helper_path, "trace-plugin-event", &detail],
+                BTreeMap::new(),
+            );
+        }
+
         fn run_helper(&self, command: HelperCommand) {
             let argv = command.argv(&self.helper_path);
             if self.debug {
@@ -227,6 +246,22 @@ mod tests {
         ready(&mut reducer);
         assert_eq!(reducer.observe_tabs([1, 2], Some(1)).len(), 1);
         assert!(reducer.observe_tabs([1, 2], Some(1)).is_empty());
+    }
+
+    #[test]
+    fn readiness_updates_do_not_reset_active_event_coalescing() {
+        let mut reducer = LifecycleReducer::default();
+        reducer.observe_tabs([7, 8], Some(7));
+        reducer.set_permission(true);
+        assert_eq!(
+            reducer.set_session_name(Some("dev".into())),
+            vec![HelperCommand::Select {
+                session_name: "dev".into(),
+                tab_id: 7,
+            }]
+        );
+        assert!(reducer.set_session_name(Some("dev".into())).is_empty());
+        assert!(reducer.observe_tabs([7, 8], Some(7)).is_empty());
     }
 
     #[test]

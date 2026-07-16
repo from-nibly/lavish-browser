@@ -9,7 +9,14 @@ fn main() -> ExitCode {
             .append(true)
             .open(path)
     {
-        let _ = writeln!(trace, "{}\t{}", std::process::id(), args.join("\t"));
+        let line = format!("{}\t{}\n", std::process::id(), args.join("\t"));
+        let _ = trace.write_all(line.as_bytes());
+    }
+    if args
+        .first()
+        .is_some_and(|argument| argument == "trace-plugin-event")
+    {
+        return ExitCode::SUCCESS;
     }
     match lavish_browser_cli::run_control(args) {
         Ok(()) => ExitCode::SUCCESS,
