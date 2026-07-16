@@ -74,22 +74,21 @@ policy defects: same-origin blob export was rejected, `FileDialog` had no
 non-portal chooser fallback, and WebKitGTK 6 expects an absolute destination
 path rather than a `file:` URI.
 
-The complete release gate remains **blocked, not passed**, only on the required
-Excalidraw edit/persistence/feedback residual. The inline real upstream
-whiteboard loads and is visible. Both WebKitWebDriver and a native AT-SPI
-pointer attempt reached the real editor, but the automated canvas gesture was
-not accepted faithfully enough to queue feedback. No Lavish API or internals
-were used as a substitute.
+The complete release gate now **passes**. The final human residual is retained
+at `target/compatibility/evidence/manual-residual-6/`: the user added one
+rectangle, and the owned unchanged `lavish-axi poll` returned a `whiteboard`
+payload identifying added element `279VBcgiM_4nEYTYcWCG-` and the real scene and
+preview paths. The edited scene remained visible after a full production browser
+close/reopen and another top-left Reload. This is classified `manual-live`; no
+Lavish API, private internals, or synthetic feedback was used as a substitute.
 
-A later human residual run is retained at
-`target/compatibility/evidence/manual-residual-5/`. The user visibly drew and
-attempted to queue the whiteboard, but persistence after reload was not
-observed. The owned real poll returned only the unrelated freeform message
-`lavish-webkit-compatibility-fixture\n\ndoes this work?`; a second real poll
-found no queued whiteboard feedback, and the live whiteboard note field was
-empty. The matrix therefore correctly remains `BLOCKED`. Interactive mode now
-retains and re-arms up to three bounded owned polls so unrelated feedback cannot
-consume the sole whiteboard evidence waiter in a future residual run.
+That residual also exposed a production controller defect: a load lifecycle
+render tried to attach a retained document widget while it was still parented
+to the previous `GtkStack`, producing duplicate-child/parent assertions and a
+blank surface despite a `Ready` model and unchanged URL/title. Rendering now
+detaches retained document widgets before rebuilding their project stacks and
+rejects nested render entry. A fixed-binary live reload retained the visible
+whiteboard with no GTK criticals.
 
 ## Capability matrix
 
@@ -108,16 +107,9 @@ consume the sole whiteboard evidence waiter in a future residual run.
 | Clipboard | PASS | Live click plus exact native X11 clipboard read |
 | Export/download | PASS | Live AT-SPI chooser wrote and verified 3,691,256-byte export |
 | External link/popup | PASS | Isolated desktop HTTPS handler received exact URL |
-| Excalidraw persistence/feedback | BLOCKED | Real editor loaded; faithful edit/queue/persistence proof incomplete |
+| Excalidraw persistence/feedback | PASS | Human-added rectangle returned by owned real whiteboard poll and persisted across full browser reopen/reload |
 | Browser-only close | PASS | Teardown did not call upstream end |
 
-`BLOCKED` remains a failing gate outcome and must not be relabeled from unit,
-direct HTTP, or private API evidence.
-
-## Remaining live manual residual
-
-Open the real inline Mermaid whiteboard in the visible production app, make a
-visible Excalidraw edit, close/reopen it, verify persistence, queue its feedback,
-and retain the real poll output. Manual observations must be labeled
-`manual-live`; WebDriver, screenshots, or API calls are supporting evidence,
-not substitutes.
+The Excalidraw result is specifically `manual-live`; automated canvas gestures,
+unit tests, screenshots alone, direct HTTP, and private APIs do not qualify as
+substitutes for this evidence.

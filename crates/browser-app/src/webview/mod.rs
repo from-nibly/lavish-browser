@@ -126,6 +126,10 @@ impl<K: Eq + Hash, V> RetainedRegistry<K, V> {
         self.values.contains_key(key)
     }
 
+    pub(crate) fn values(&self) -> impl Iterator<Item = &V> {
+        self.values.values()
+    }
+
     pub(crate) fn insert(&mut self, key: K, value: V) {
         self.values.insert(key, value);
     }
@@ -837,6 +841,9 @@ mod tests {
         assert_eq!(registry.get(&first), Some(&11));
         assert_eq!(registry.get(&second), Some(&22));
         assert_eq!(registry.len(), 2);
+        let mut values: Vec<_> = registry.values().copied().collect();
+        values.sort_unstable();
+        assert_eq!(values, [11, 22]);
 
         assert_eq!(registry.retain_keys(&HashSet::from([second])), 1);
         assert_eq!(registry.get(&first), None);

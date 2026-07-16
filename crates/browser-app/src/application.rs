@@ -330,7 +330,22 @@ impl AppController {
     }
 
     fn render(self: &Rc<Self>) {
-        self.rendering.set(true);
+        if self.rendering.replace(true) {
+            return;
+        }
+        let retained_widgets: Vec<_> = self
+            .document_views
+            .borrow()
+            .values()
+            .map(|view| view.widget())
+            .collect();
+        for widget in retained_widgets {
+            if let Some(parent) = widget.parent()
+                && let Ok(stack) = parent.downcast::<gtk::Stack>()
+            {
+                stack.remove(&widget);
+            }
+        }
         while self.notebook.n_pages() > 0 {
             self.notebook.remove_page(Some(0));
         }
