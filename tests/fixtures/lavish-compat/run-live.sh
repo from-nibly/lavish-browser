@@ -4,6 +4,11 @@ set -euo pipefail
 root=$(git rev-parse --show-toplevel)
 evidence=${1:-target/compatibility/production}
 port=${LAVISH_WEBDRIVER_PORT:-9594}
+manual_display=${LAVISH_MANUAL_DISPLAY:-${DISPLAY:-:1}}
+manual_args=()
+if [[ ${LAVISH_MANUAL_EXCALIDRAW:-0} == 1 ]]; then
+  manual_args=(--manual-excalidraw --manual-display "$manual_display")
+fi
 
 session_conf=$(find /nix/store -path '*/share/dbus-1/session.conf' | head -1)
 atspi_conf=$(find /nix/store -path '*at-spi2-core-*/share/defaults/at-spi2/accessibility.conf' | head -1)
@@ -28,4 +33,5 @@ DISPLAY=:99 python -u "$root/tests/fixtures/lavish-compat/run.py" \
   --browser "$root/target/debug/lavish-browser" \
   --launcher "$root/target/debug/lavish-open" \
   --evidence "$root/$evidence" \
-  --port "$port"
+  --port "$port" \
+  "${manual_args[@]}"

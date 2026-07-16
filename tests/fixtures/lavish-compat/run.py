@@ -61,6 +61,9 @@ def main() -> int:
     parser.add_argument("--webdriver", default="WebKitWebDriver")
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--port", type=int, default=9518)
+    parser.add_argument("--manual-excalidraw", action="store_true")
+    parser.add_argument("--manual-display", default=os.environ.get("DISPLAY", ":0"))
+    parser.add_argument("--manual-timeout", type=int, default=1800)
     args = parser.parse_args()
 
     if not os.environ.get("DISPLAY"):
@@ -128,6 +131,7 @@ def main() -> int:
     browser = subprocess.Popen([str(args.browser.resolve())], env=env, stdout=browser_log, stderr=subprocess.STDOUT)
     driver_process: subprocess.Popen[str] | None = None
     driver: webdriver.Remote | None = None
+    manual_browser_log = None
     tracked_polls: list[subprocess.Popen[str]] = []
     results: dict[str, dict[str, str]] = {}
     w3c_trace: list[dict[str, Any]] = []
@@ -250,32 +254,36 @@ def main() -> int:
             results["mermaid"] = {"status": "blocked", "evidence": f"{type(error).__name__}: Mermaid global/elements recorded in W3C trace", "classification": "automated-live"}
 
         whiteboard = w3c("whiteboard.inline_frame", lambda: wait.until(lambda d: d.find_element(By.CSS_SELECTOR, "iframe[title='Excalidraw whiteboard']")))
-        try:
-            driver.switch_to.frame(whiteboard)
-            w3c("whiteboard.inline_ready", lambda: wait.until(lambda d: d.find_element(By.ID, "wbQueue").is_displayed()))
-            canvas = w3c("whiteboard.canvas", lambda: wait.until(lambda d: d.execute_script("return [...document.querySelectorAll('canvas')].find(c => { const r=c.getBoundingClientRect(); return r.width > 100 && r.height > 100; }) || null")))
-            native_whiteboard = subprocess.run(
-                ["python", str(Path(__file__).resolve().parent / "native_whiteboard.py"),
-                 "--gesture-only", "--trace", str(evidence / "native-whiteboard-trace.json")],
-                env=env, text=True, capture_output=True, timeout=45,
-            )
-            (evidence / "native-whiteboard.log").write_text(native_whiteboard.stdout + native_whiteboard.stderr)
-            if native_whiteboard.returncode != 0:
-                raise RuntimeError("native whiteboard gesture failed")
-            driver.find_element(By.ID, "wbNote").send_keys("live Excalidraw rectangle persistence check")
-            whiteboard_poll = poll(artifact, env)
-            tracked_polls.append(whiteboard_poll)
-            time.sleep(1)
-            driver.find_element(By.ID, "wbQueue").click()
-            whiteboard_result = finish(whiteboard_poll, timeout=120)
-            (evidence / "poll-whiteboard.json").write_text(json.dumps(whiteboard_result, indent=2))
-            assert whiteboard_result["exit_code"] == 0 and "live Excalidraw rectangle persistence check" in whiteboard_result["stdout"]
-            driver.save_screenshot(str(evidence / "excalidraw-edited.png"))
-            results["excalidraw"] = {"status": "pass", "evidence": "live canvas rectangle gesture autosaved and Queue feedback woke real poll with the note; screenshot retained", "classification": "live-gui-pointer"}
-        except Exception as error:
-            results["excalidraw"] = {"status": "blocked", "evidence": f"{type(error).__name__}: WebKitWebDriver pointer gesture was not faithful; explicit live manual gesture required", "classification": "manual-required"}
-        finally:
+        if args.manual_excalidraw:
+            results["excalidraw"] = {"status": "blocked", "evidence": "waiting for explicit live human observation and real poll output", "classification": "manual-required"}
             driver.switch_to.default_content()
+        else:
+            try:
+                driver.switch_to.frame(whiteboard)
+                w3c("whiteboard.inline_ready", lambda: wait.until(lambda d: d.find_element(By.ID, "wbQueue").is_displayed()))
+                canvas = w3c("whiteboard.canvas", lambda: wait.until(lambda d: d.execute_script("return [...document.querySelectorAll('canvas')].find(c => { const r=c.getBoundingClientRect(); return r.width > 100 && r.height > 100; }) || null")))
+                native_whiteboard = subprocess.run(
+                    ["python", str(Path(__file__).resolve().parent / "native_whiteboard.py"),
+                     "--gesture-only", "--trace", str(evidence / "native-whiteboard-trace.json")],
+                    env=env, text=True, capture_output=True, timeout=45,
+                )
+                (evidence / "native-whiteboard.log").write_text(native_whiteboard.stdout + native_whiteboard.stderr)
+                if native_whiteboard.returncode != 0:
+                    raise RuntimeError("native whiteboard gesture failed")
+                driver.find_element(By.ID, "wbNote").send_keys("live Excalidraw rectangle persistence check")
+                whiteboard_poll = poll(artifact, env)
+                tracked_polls.append(whiteboard_poll)
+                time.sleep(1)
+                driver.find_element(By.ID, "wbQueue").click()
+                whiteboard_result = finish(whiteboard_poll, timeout=120)
+                (evidence / "poll-whiteboard.json").write_text(json.dumps(whiteboard_result, indent=2))
+                assert whiteboard_result["exit_code"] == 0 and "live Excalidraw rectangle persistence check" in whiteboard_result["stdout"]
+                driver.save_screenshot(str(evidence / "excalidraw-edited.png"))
+                results["excalidraw"] = {"status": "pass", "evidence": "live canvas rectangle gesture autosaved and Queue feedback woke real poll with the note; screenshot retained", "classification": "live-gui-pointer"}
+            except Exception as error:
+                results["excalidraw"] = {"status": "blocked", "evidence": f"{type(error).__name__}: WebKitWebDriver pointer gesture was not faithful; explicit live manual gesture required", "classification": "manual-required"}
+            finally:
+                driver.switch_to.default_content()
 
         message_poll = poll(artifact, env)
         tracked_polls.append(message_poll)
@@ -345,6 +353,89 @@ def main() -> int:
 
         driver.save_screenshot(str(evidence / "production-session.png"))
         passed("close_semantics", "WebDriver teardown closes browser view without invoking lavish-axi end")
+
+        if args.manual_excalidraw:
+            artifact.write_text(original)
+            driver.quit()
+            driver = None
+            driver_process.terminate()
+            driver_process.wait(timeout=10)
+            driver_process = None
+            socket.unlink(missing_ok=True)
+
+            manual_env = env.copy()
+            manual_env.pop("LAVISH_BROWSER_AUTOMATION", None)
+            manual_env["DISPLAY"] = args.manual_display
+            manual_browser_log = (evidence / "manual-browser.log").open("w")
+            browser = subprocess.Popen(
+                [str(args.browser.resolve())],
+                env=manual_env,
+                stdout=manual_browser_log,
+                stderr=subprocess.STDOUT,
+            )
+            wait_for(socket)
+            time.sleep(5)
+
+            manual_poll = poll(artifact, manual_env)
+            tracked_polls.append(manual_poll)
+            result_path = evidence / "manual-result.json"
+            ready = {
+                "status": "ready",
+                "evidence": str(evidence),
+                "artifact": str(artifact),
+                "session_url": session_url,
+                "display": args.manual_display,
+                "browser_pid": browser.pid,
+                "poll_pid": manual_poll.pid,
+                "result_path": str(result_path),
+                "feedback_note": "manual Excalidraw persistence confirmation",
+            }
+            (evidence / "manual-ready.json").write_text(json.dumps(ready, indent=2))
+            print("MANUAL_EXCALIDRAW_READY " + json.dumps(ready), flush=True)
+            print(
+                "GUI steps: in Lavish Browser scroll to the Mermaid whiteboard; click 'Click to edit'; "
+                "draw a clearly visible shape; wait 3 seconds; use More > Reload artifact; confirm the shape "
+                "reappears; enter note 'manual Excalidraw persistence confirmation' in the whiteboard; "
+                "click 'Queue feedback'; then report edit visibility and persistence to the conductor.",
+                flush=True,
+            )
+
+            deadline = time.monotonic() + args.manual_timeout
+            while not result_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.5)
+            if not result_path.exists():
+                raise TimeoutError("manual Excalidraw result was not supplied before the bounded timeout")
+            observation = json.loads(result_path.read_text())
+            observed_pass = all([
+                observation.get("status") == "pass",
+                observation.get("edit_visible") is True,
+                observation.get("persisted_after_reload") is True,
+                observation.get("feedback_queued") is True,
+            ])
+            if observed_pass:
+                manual_poll_result = finish(manual_poll, timeout=60)
+                (evidence / "poll-whiteboard-manual.json").write_text(json.dumps(manual_poll_result, indent=2))
+                if (
+                    manual_poll_result["exit_code"] == 0
+                    and "manual Excalidraw persistence confirmation" in manual_poll_result["stdout"]
+                ):
+                    results["excalidraw"] = {
+                        "status": "pass",
+                        "evidence": "human observed edit persistence after reload and real owned poll received queued whiteboard feedback",
+                        "classification": "manual-live",
+                    }
+                else:
+                    results["excalidraw"] = {
+                        "status": "blocked",
+                        "evidence": "human observation passed but the owned real poll did not return matching whiteboard feedback",
+                        "classification": "manual-live",
+                    }
+            else:
+                results["excalidraw"] = {
+                    "status": "blocked",
+                    "evidence": f"human observation did not pass: {observation}",
+                    "classification": "manual-live",
+                }
     except Exception as error:
         automation_blocker = f"{type(error).__name__}: {error}"
         (evidence / "automation-blocker.txt").write_text(automation_blocker + "\n")
@@ -366,6 +457,8 @@ def main() -> int:
         if browser.poll() is None:
             browser.terminate()
         browser_log.close()
+        if manual_browser_log is not None:
+            manual_browser_log.close()
         if state.exists():
             shutil.copytree(state, evidence / "xdg-state", dirs_exist_ok=True)
         (evidence / "w3c-trace.json").write_text(json.dumps(w3c_trace, indent=2))
