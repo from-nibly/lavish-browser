@@ -17,12 +17,17 @@ pkgs.mkShell {
   nativeBuildInputs = with pkgs; [
     cargo
     clippy
+    dbus
+    desktop-file-utils
     pkg-config
     wasiRustc
     rustfmt
     e2ePython
     lld
+    util-linux
     wmctrl
+    xclip
+    xprop
     xorg-server
   ];
 

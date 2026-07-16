@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Lavish Browser
+Comment=Dedicated browser for local Lavish review sessions
+Exec=lavish-browser
+Icon=works.from-nibly.LavishBrowser
+Terminal=false
+Categories=Development;
+StartupNotify=true
+StartupWMClass=works.from-nibly.LavishBrowser
+X-GNOME-UsesNotifications=false

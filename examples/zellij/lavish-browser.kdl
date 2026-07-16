@@ -1,9 +1,8 @@
-// Add this block to Zellij's config.kdl after installing the WASM and helper.
+// Add this block to Zellij's config.kdl after running scripts/install.sh.
 // The first load prompts for ReadApplicationState and RunCommands permissions.
-// Build with: cargo build --locked -p lavish-browser-zellij --release --target wasm32-wasip1
 load_plugins {
-    "file:/absolute/path/to/lavish_browser_zellij.wasm" {
-        helper_path "/absolute/path/to/lavish-browser-ctl"
+    "file:/usr/local/share/lavish-browser/zellij/lavish-browser-zellij.wasm" {
+        helper_path "/usr/local/bin/lavish-browser-ctl"
         debug "false"
     }
 }

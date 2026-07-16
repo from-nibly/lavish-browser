@@ -48,29 +48,30 @@ Verify the native automation Python APIs, including their typelibs, with:
 nix-shell --run 'python -c "import dogtail.tree; import pyatspi"'
 ```
 
-## Running components
+## Running and installing components
 
-The production workspace currently establishes protocol/domain foundations and
-component seams. These commands compile, but are intentionally skeletal and do
-not yet launch or control a browser:
+Run the production browser and control entrypoints from the workspace:
 
 ```bash
 nix-shell --run 'cargo run -p lavish-browser'
-nix-shell --run 'cargo run -p lavish-browser-cli --bin lavish-open'
-nix-shell --run 'cargo run -p lavish-browser-cli --bin lavish-browser-ctl'
+nix-shell --run 'cargo run -p lavish-browser-cli --bin lavish-open -- artifact.html'
+nix-shell --run 'cargo run -p lavish-browser-cli --bin lavish-browser-ctl -- status --json'
 ```
 
-Likewise, `lavish-browser-zellij` currently exports only a target-compatible
-plugin skeleton. It does not subscribe to Zellij events or invoke the control
-helper yet.
-
-The two `prototypes/` packages remain buildable reference implementations, not
-production entry points. The WebView prototype requires an already-running,
-loopback upstream Lavish `/session/…` URL:
+Build and stage all native binaries, desktop assets, and the optional real
+Zellij WASM plugin with:
 
 ```bash
-nix-shell --run 'cargo run -p lavish-webview-prototype -- http://127.0.0.1:4387/session/example'
+nix-shell --run 'scripts/install.sh --prefix /usr --destdir "$PWD/target/package-root"'
 ```
+
+The complete installed release smoke is documented in
+[`docs/installed-e2e.md`](docs/installed-e2e.md). It requires real Lavish,
+GTK/WebKit, WebKitWebDriver, AT-SPI/Dogtail, and an isolated real Zellij
+session; unit tests or fake boundaries do not substitute for it.
+
+The two `prototypes/` packages remain buildable historical references pending
+the final cleanup stage. They are not installed or used by production E2E.
 
 ## Eventual runtime dependencies
 
