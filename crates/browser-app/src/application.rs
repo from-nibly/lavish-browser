@@ -650,23 +650,16 @@ fn document_row(
     document: &lavish_browser_core::Document,
     controller: &Rc<AppController>,
 ) -> gtk::ListBoxRow {
-    let source = Path::new(&document.key.canonical_source_file);
-    let basename = source
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(&document.key.canonical_source_file);
-    let parent = source
-        .parent()
-        .and_then(Path::to_str)
-        .filter(|parent| !parent.is_empty())
-        .unwrap_or(" ");
+    let (basename, detail_text) =
+        document_row_labels(&document.key.canonical_source_file, &document.lifecycle);
     let labels = gtk::Box::new(gtk::Orientation::Vertical, 1);
-    let name = gtk::Label::new(Some(basename));
+    labels.set_hexpand(true);
+    let name = gtk::Label::new(Some(&basename));
     name.set_xalign(0.0);
-    let detail = gtk::Label::new(Some(&format!(
-        "{parent} · {}",
-        lifecycle_text(&document.lifecycle)
-    )));
+    name.set_hexpand(true);
+    name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    name.set_max_width_chars(28);
+    let detail = gtk::Label::new(Some(detail_text));
     detail.set_xalign(0.0);
     detail.add_css_class("dim-label");
     detail.add_css_class("caption");
@@ -681,8 +674,7 @@ fn document_row(
     close.set_widget_name(&format!("document-close-{identity}"));
     close.set_tooltip_text(Some(&format!("Close document {basename}")));
     close.update_property(&[gtk::accessible::Property::Label(&format!(
-        "Close document {basename}, source {}, {}",
-        document.key.canonical_source_file,
+        "Close document {basename}, {}, document identity {identity}",
         project_accessible_identity(&document.key.project)
     ))]);
     close.add_css_class("flat");
@@ -698,13 +690,22 @@ fn document_row(
     let row = gtk::ListBoxRow::new();
     row.set_widget_name(&format!("document-row-{identity}"));
     row.update_property(&[gtk::accessible::Property::Label(&format!(
-        "Document {basename}, source {}, {}, {}",
-        document.key.canonical_source_file,
+        "Document {basename}, {}, {}, document identity {identity}",
         project_accessible_identity(&document.key.project),
         lifecycle_text(&document.lifecycle)
     ))]);
+    row.set_tooltip_text(Some(&document.key.canonical_source_file));
     row.set_child(Some(&content));
     row
+}
+
+fn document_row_labels(source: &str, lifecycle: &DocumentLifecycle) -> (String, &'static str) {
+    let basename = Path::new(source)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(source)
+        .to_owned();
+    (basename, lifecycle_text(lifecycle))
 }
 
 fn document_placeholder(
@@ -875,7 +876,7 @@ fn timestamp() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{document_identity, project_identity, snapshot};
+    use super::{document_identity, document_row_labels, project_identity, snapshot};
     use lavish_browser_core::{BrowserModel, DocumentKey, DocumentLifecycle};
     use lavish_browser_protocol::{ProjectKey, ProjectMetadata};
 
@@ -951,6 +952,17 @@ mod tests {
                 canonical_source_file: "/work/a/b-report.html".into(),
             })
         );
+    }
+
+    #[test]
+    fn document_row_visible_labels_do_not_include_the_canonical_parent_path() {
+        let source = "/very/long/worktree/path/that/must/not/size/the/sidebar/report.html";
+        let (name, detail) = document_row_labels(source, &DocumentLifecycle::Ready);
+
+        assert_eq!(name, "report.html");
+        assert_eq!(detail, "Ready");
+        assert!(!name.contains("/very/long"));
+        assert!(!detail.contains("/very/long"));
     }
 
     #[test]
