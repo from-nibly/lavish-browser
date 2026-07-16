@@ -18,7 +18,7 @@ for command in "${required[@]}"; do
 done
 [[ -n ${DISPLAY:-} ]] || echo "INFO: using isolated Xvfb; no ambient display inherited" >&2
 
-"$root/scripts/install.sh" --prefix "$prefix" --profile "$profile"
+"$root/packaging/install.sh" --prefix "$prefix" --profile "$profile"
 desktop-file-validate "$prefix/share/applications/works.from-nibly.LavishBrowser.desktop"
 
 session_conf=$(find /nix/store -path '*/share/dbus-1/session.conf' | head -1)
@@ -82,7 +82,7 @@ sleep 1
 
 integration_manual=()
 [[ ${LAVISH_MANUAL_EXCALIDRAW:-0} == 1 ]] && integration_manual=(--manual-excalidraw)
-python -u "$root/tests/installed/run.py" \
+python -u "$root/tests/e2e/run.py" \
   --prefix "$prefix" --evidence "$evidence/integration" \
   "${integration_manual[@]}" 2>&1 | tee "$evidence/logs/installed-harness.log"
 integration_status=${PIPESTATUS[0]}

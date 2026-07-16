@@ -225,7 +225,7 @@ def main() -> int:
         passed("plugin_focus", f"real plugin selected/ignored/closed one-way; active window unchanged: {focus_before}")
 
         # AT-SPI is a required independent visible-native assertion.
-        dogtail = run([sys.executable, str(root / "tests/installed/verify_accessibility.py"), artifact_a.name, artifact_b.name], env, check=False)
+        dogtail = run([sys.executable, str(root / "tests/e2e/verify_accessibility.py"), artifact_a.name, artifact_b.name], env, check=False)
         (evidence / "accessibility.log").write_text(dogtail.stdout + dogtail.stderr)
         if dogtail.returncode:
             raise RuntimeError("AT-SPI/Dogtail native assertion failed; see accessibility.log")

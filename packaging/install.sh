@@ -9,7 +9,7 @@ build=1
 
 usage() {
   cat <<'EOF'
-Usage: scripts/install.sh [--prefix PATH] [--destdir PATH] [--profile debug|release] [--no-build]
+Usage: packaging/install.sh [--prefix PATH] [--destdir PATH] [--profile debug|release] [--no-build]
 
 Installs Lavish Browser's native binaries, desktop metadata, and optional
 Zellij plugin. DESTDIR is honored for package staging; installed desktop and
@@ -50,8 +50,8 @@ install -m 0755 "$native_dir/lavish-open" "$stage/bin/lavish-open"
 install -m 0755 "$native_dir/lavish-browser-ctl" "$stage/bin/lavish-browser-ctl"
 install -m 0644 "$wasm_dir/lavish_browser_zellij.wasm" \
   "$stage/share/lavish-browser/zellij/lavish-browser-zellij.wasm"
-install -m 0644 "$root/data/works.from-nibly.LavishBrowser.desktop" "$stage/share/applications/"
-install -m 0644 "$root/data/works.from-nibly.LavishBrowser.svg" \
+install -m 0644 "$root/assets/works.from-nibly.LavishBrowser.desktop" "$stage/share/applications/"
+install -m 0644 "$root/assets/works.from-nibly.LavishBrowser.svg" \
   "$stage/share/icons/hicolor/scalable/apps/works.from-nibly.LavishBrowser.svg"
 
 printf 'Installed Lavish Browser under %s\n' "$stage"
