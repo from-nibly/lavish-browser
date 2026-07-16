@@ -810,6 +810,24 @@ fn document_row(
     labels.set_hexpand(true);
     content.append(&labels);
     let identity = document_identity(&document.key);
+    if document.lifecycle == DocumentLifecycle::Suspended {
+        let resume = gtk::Button::with_label("Resume");
+        resume.set_widget_name(&format!("document-resume-{identity}"));
+        resume.set_tooltip_text(Some(&format!("Resume suspended document {basename}")));
+        resume.update_property(&[gtk::accessible::Property::Label(&format!(
+            "Resume suspended document {basename}, {}, document identity {identity}",
+            project_accessible_identity(&document.key.project)
+        ))]);
+        resume.add_css_class("flat");
+        let key = document.key.clone();
+        let weak = Rc::downgrade(controller);
+        resume.connect_clicked(move |_| {
+            if let Some(controller) = weak.upgrade() {
+                controller.mutate(|model| model.select_document(&key, timestamp()));
+            }
+        });
+        content.append(&resume);
+    }
     let close = gtk::Button::from_icon_name("window-close-symbolic");
     close.set_widget_name(&format!("document-close-{identity}"));
     close.set_tooltip_text(Some(&format!("Close document {basename}")));
