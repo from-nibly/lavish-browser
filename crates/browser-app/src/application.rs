@@ -595,15 +595,12 @@ impl AppController {
         let webview = view.automation_webview();
         self.document_views
             .borrow_mut()
-            .insert(document.key.clone(), view.clone());
+            .insert(document.key.clone(), view);
         let weak = Rc::downgrade(self);
         glib::idle_add_local_once(move || {
             if let Some(controller) = weak.upgrade() {
                 controller.render();
             }
-        });
-        glib::timeout_add_local_once(Duration::from_secs(1), move || {
-            view.start_automation_load();
         });
         Some(webview)
     }

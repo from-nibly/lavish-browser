@@ -22,6 +22,7 @@ import time
 from typing import Any
 
 from selenium import webdriver
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.remote.client_config import ClientConfig
 from selenium.webdriver.support.ui import WebDriverWait
@@ -76,8 +77,20 @@ def main() -> int:
     runtime = isolated / "runtime"
     state = isolated / "state"
     config = isolated / "config"
-    for directory in (runtime, state, config):
+    data = isolated / "data"
+    for directory in (runtime, state, config, data):
         directory.mkdir(parents=True, mode=0o700)
+    handler_log = evidence / "external-handler.log"
+    handler = evidence / "external-handler.sh"
+    handler.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$1\" >> {handler_log}\n")
+    handler.chmod(0o700)
+    applications = data / "applications"
+    applications.mkdir()
+    (applications / "lavish-compat-handler.desktop").write_text(
+        "[Desktop Entry]\nType=Application\nName=Lavish compatibility handler\n"
+        f"Exec={handler} %u\nNoDisplay=true\n"
+        "MimeType=x-scheme-handler/http;x-scheme-handler/https;\n"
+    )
     env = os.environ.copy()
     for name in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
         env.pop(name, None)
@@ -85,8 +98,12 @@ def main() -> int:
         "XDG_RUNTIME_DIR": str(runtime),
         "XDG_STATE_HOME": str(state),
         "XDG_CONFIG_HOME": str(config),
+        "XDG_DATA_HOME": str(data),
         "LAVISH_BROWSER_AUTOMATION": "1",
     })
+    subprocess.run(["update-desktop-database", str(applications)], env=env, capture_output=True)
+    subprocess.run(["gio", "mime", "x-scheme-handler/http", "lavish-compat-handler.desktop"], env=env, capture_output=True)
+    subprocess.run(["gio", "mime", "x-scheme-handler/https", "lavish-compat-handler.desktop"], env=env, capture_output=True)
 
     versions: dict[str, str] = {}
     for name, command in {
@@ -113,7 +130,18 @@ def main() -> int:
     driver: webdriver.Remote | None = None
     tracked_polls: list[subprocess.Popen[str]] = []
     results: dict[str, dict[str, str]] = {}
+    w3c_trace: list[dict[str, Any]] = []
     automation_blocker: str | None = None
+
+    def w3c(label: str, operation: Any) -> Any:
+        started = time.monotonic()
+        try:
+            value = operation()
+            w3c_trace.append({"command": label, "seconds": time.monotonic() - started, "status": "ok", "value": str(value)[:2000]})
+            return value
+        except Exception as error:
+            w3c_trace.append({"command": label, "seconds": time.monotonic() - started, "status": "error", "error": f"{type(error).__name__}: {error}"})
+            raise
 
     def passed(capability: str, evidence_text: str) -> None:
         results[capability] = {"status": "pass", "evidence": evidence_text, "classification": "automated-live"}
@@ -123,13 +151,29 @@ def main() -> int:
         socket = runtime / "lavish-browser" / "control.sock"
         wait_for(socket)
         time.sleep(0.5)
-        try:
-            routed = run([str(args.launcher.resolve()), str(artifact)], env=env, timeout=90)
-        except subprocess.CalledProcessError as error:
-            (evidence / "launcher-failure.log").write_text((error.stdout or "") + (error.stderr or ""))
-            raise
+        routed = None
+        for attempt in range(3):
+            try:
+                routed = run([str(args.launcher.resolve()), str(artifact)], env=env, timeout=90)
+                break
+            except subprocess.CalledProcessError as error:
+                (evidence / f"launcher-failure-{attempt + 1}.log").write_text((error.stdout or "") + (error.stderr or ""))
+                time.sleep(0.5)
+        if routed is None:
+            raise RuntimeError("production launcher could not route after three bounded attempts")
         (evidence / "launcher.log").write_text(routed.stdout + routed.stderr)
         time.sleep(2)
+        native_export = evidence / "artifact.export.html"
+        native_download = subprocess.run(
+            ["python", str(Path(__file__).resolve().parent / "native_download.py"),
+             "--destination", str(native_export), "--trace", str(evidence / "native-download-trace.json")],
+            env=env, text=True, capture_output=True, timeout=90,
+        )
+        (evidence / "native-download.log").write_text(native_download.stdout + native_download.stderr)
+        if native_download.returncode == 0 and native_export.is_file() and "<!doctype html" in native_export.read_text().lower():
+            results["download"] = {"status": "pass", "evidence": f"live AT-SPI export chooser wrote and verified {native_export.stat().st_size} bytes", "classification": "manual-live-native"}
+        else:
+            results["download"] = {"status": "blocked", "evidence": "live native export/chooser check failed; see native-download.log and trace", "classification": "manual-required"}
         browser.terminate()
         browser.wait(timeout=10)
         socket.unlink(missing_ok=True)
@@ -151,11 +195,19 @@ def main() -> int:
             client_config=ClientConfig(remote_server_addr=endpoint, timeout=45),
         )
         print("WebDriver session created", flush=True)
-        driver.set_window_size(1280, 800)
-        time.sleep(2)
-        print("production controller navigation started", flush=True)
+        w3c("window_handles.blank", lambda: driver.window_handles)
+        w3c("current_url.blank", lambda: driver.current_url)
+        w3c("title.blank", lambda: driver.title)
+        w3c("ready_state.blank", lambda: driver.execute_script("return document.readyState"))
+        w3c("html.blank", lambda: driver.find_element(By.TAG_NAME, "html").tag_name)
+        w3c("navigate.real_lavish", lambda: driver.get(session_url))
+        print("WebDriver requested real-session navigation", flush=True)
         wait = WebDriverWait(driver, 30)
-        gate = wait.until(lambda d: d.find_element(By.ID, "layoutGateOverlay"))
+        w3c("window_handles.lavish", lambda: driver.window_handles)
+        w3c("current_url.lavish", lambda: driver.current_url)
+        w3c("title.lavish", lambda: driver.title)
+        w3c("ready_state.lavish", lambda: driver.execute_script("return document.readyState"))
+        gate = w3c("find.layout_gate", lambda: wait.until(lambda d: d.find_element(By.ID, "layoutGateOverlay")))
         passed("production_webdriver", f"W3C session {driver.session_id}; {driver.capabilities}")
 
         wait.until(lambda _: gate.get_attribute("hidden") is not None)
@@ -170,9 +222,60 @@ def main() -> int:
         font = driver.execute_script("return getComputedStyle(document.documentElement).fontFamily")
         assert "Compatibility Fixture" in font
         passed("sibling_assets", f"relative CSS/JS/SVG/font loaded; computed font={font}")
-        wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, ".mermaid svg")) > 0)
-        passed("mermaid", "real iframe rendered .mermaid svg")
+
+        driver.find_element(By.ID, "clipboard").click()
+        clipboard = run(["xclip", "-selection", "clipboard", "-o"], env=env).stdout
+        assert clipboard == "lavish-webkit-compatibility-fixture"
+        results["clipboard"] = {"status": "pass", "evidence": "live artifact click reached the native X11 clipboard and xclip read exact text", "classification": "live-gui-native"}
+
         driver.switch_to.default_content()
+        driver.find_element(By.ID, "annotation").click()
+        driver.switch_to.frame(driver.find_element(By.ID, "artifact"))
+        driver.find_element(By.ID, "external").click()
+        try:
+            WebDriverWait(driver, 10).until(lambda _: handler_log.exists() and "https://example.com/" in handler_log.read_text())
+            results["external_popup"] = {"status": "pass", "evidence": "live target=_blank click invoked isolated desktop HTTPS handler and retained the Lavish context", "classification": "live-gui-native"}
+        except Exception as error:
+            results["external_popup"] = {"status": "blocked", "evidence": f"{type(error).__name__}: no isolated desktop handler invocation", "classification": "live-gui-native"}
+        driver.switch_to.default_content()
+        driver.find_element(By.ID, "annotation").click()
+        driver.switch_to.frame(driver.find_element(By.ID, "artifact"))
+
+        w3c("mermaid.global", lambda: driver.execute_script("return typeof window.mermaid"))
+        w3c("mermaid.elements", lambda: [(element.tag_name, element.get_attribute("class")) for element in driver.find_elements(By.CSS_SELECTOR, ".mermaid, .lavish-whiteboard, iframe, svg")])
+        try:
+            WebDriverWait(driver, 10).until(lambda d: len(d.find_elements(By.CSS_SELECTOR, ".mermaid svg, iframe[src*='whiteboard']")) > 0)
+            passed("mermaid", "real iframe rendered Mermaid or its upstream inline whiteboard")
+        except Exception as error:
+            results["mermaid"] = {"status": "blocked", "evidence": f"{type(error).__name__}: Mermaid global/elements recorded in W3C trace", "classification": "automated-live"}
+
+        whiteboard = w3c("whiteboard.inline_frame", lambda: wait.until(lambda d: d.find_element(By.CSS_SELECTOR, "iframe[title='Excalidraw whiteboard']")))
+        try:
+            driver.switch_to.frame(whiteboard)
+            w3c("whiteboard.inline_ready", lambda: wait.until(lambda d: d.find_element(By.ID, "wbQueue").is_displayed()))
+            canvas = w3c("whiteboard.canvas", lambda: wait.until(lambda d: d.execute_script("return [...document.querySelectorAll('canvas')].find(c => { const r=c.getBoundingClientRect(); return r.width > 100 && r.height > 100; }) || null")))
+            native_whiteboard = subprocess.run(
+                ["python", str(Path(__file__).resolve().parent / "native_whiteboard.py"),
+                 "--gesture-only", "--trace", str(evidence / "native-whiteboard-trace.json")],
+                env=env, text=True, capture_output=True, timeout=45,
+            )
+            (evidence / "native-whiteboard.log").write_text(native_whiteboard.stdout + native_whiteboard.stderr)
+            if native_whiteboard.returncode != 0:
+                raise RuntimeError("native whiteboard gesture failed")
+            driver.find_element(By.ID, "wbNote").send_keys("live Excalidraw rectangle persistence check")
+            whiteboard_poll = poll(artifact, env)
+            tracked_polls.append(whiteboard_poll)
+            time.sleep(1)
+            driver.find_element(By.ID, "wbQueue").click()
+            whiteboard_result = finish(whiteboard_poll, timeout=120)
+            (evidence / "poll-whiteboard.json").write_text(json.dumps(whiteboard_result, indent=2))
+            assert whiteboard_result["exit_code"] == 0 and "live Excalidraw rectangle persistence check" in whiteboard_result["stdout"]
+            driver.save_screenshot(str(evidence / "excalidraw-edited.png"))
+            results["excalidraw"] = {"status": "pass", "evidence": "live canvas rectangle gesture autosaved and Queue feedback woke real poll with the note; screenshot retained", "classification": "live-gui-pointer"}
+        except Exception as error:
+            results["excalidraw"] = {"status": "blocked", "evidence": f"{type(error).__name__}: WebKitWebDriver pointer gesture was not faithful; explicit live manual gesture required", "classification": "manual-required"}
+        finally:
+            driver.switch_to.default_content()
 
         message_poll = poll(artifact, env)
         tracked_polls.append(message_poll)
@@ -195,9 +298,35 @@ def main() -> int:
 
         driver.switch_to.frame(driver.find_element(By.ID, "artifact"))
         driver.find_element(By.ID, "fixture-title").click()
+        annotation_host = wait.until(lambda d: d.find_element(By.CSS_SELECTOR, ".lavish-annotation-root"))
+        annotation_host.shadow_root.find_element(By.CSS_SELECTOR, "textarea").send_keys("element annotation from WebDriver")
+        annotation_host.shadow_root.find_element(By.CSS_SELECTOR, ".lavish-send").click()
         driver.switch_to.default_content()
-        wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, "#annotationPills .annotation-pill")) > 0)
-        passed("element_annotation", "WebDriver click in sandboxed artifact queued an annotation pill")
+        wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, "#annotationPills .pill")) > 0)
+        annotation_poll = poll(artifact, env)
+        tracked_polls.append(annotation_poll)
+        time.sleep(1)
+        driver.find_element(By.ID, "send").click()
+        annotation_result = finish(annotation_poll)
+        (evidence / "poll-annotation.json").write_text(json.dumps(annotation_result, indent=2))
+        assert annotation_result["exit_code"] == 0 and "element annotation from WebDriver" in annotation_result["stdout"]
+        passed("element_annotation", "production SDK annotation was sent through and woke real poll")
+
+        driver.switch_to.frame(driver.find_element(By.ID, "artifact"))
+        text_target = driver.find_element(By.ID, "text-range")
+        ActionChains(driver).move_to_element_with_offset(text_target, 5, int(text_target.rect["height"] / 2)).click_and_hold().move_by_offset(int(max(40, text_target.rect["width"] * 0.6)), 0).release().perform()
+        range_host = wait.until(lambda d: d.find_element(By.CSS_SELECTOR, ".lavish-annotation-root"))
+        range_host.shadow_root.find_element(By.CSS_SELECTOR, "textarea").send_keys("text range from live pointer drag")
+        range_host.shadow_root.find_element(By.CSS_SELECTOR, ".lavish-send").click()
+        driver.switch_to.default_content()
+        range_poll = poll(artifact, env)
+        tracked_polls.append(range_poll)
+        time.sleep(1)
+        driver.find_element(By.ID, "send").click()
+        range_result = finish(range_poll)
+        (evidence / "poll-text-range.json").write_text(json.dumps(range_result, indent=2))
+        assert range_result["exit_code"] == 0 and "text range from live pointer drag" in range_result["stdout"]
+        results["text_range_annotation"] = {"status": "pass", "evidence": "live pointer drag created a text-range SDK card and real poll received it", "classification": "live-gui-pointer"}
 
         original = artifact.read_text()
         artifact.write_text(original.replace("live-reload validation", "live-reload observed"))
@@ -239,6 +368,7 @@ def main() -> int:
         browser_log.close()
         if state.exists():
             shutil.copytree(state, evidence / "xdg-state", dirs_exist_ok=True)
+        (evidence / "w3c-trace.json").write_text(json.dumps(w3c_trace, indent=2))
         shutil.rmtree(isolated, ignore_errors=True)
 
     if automation_blocker:

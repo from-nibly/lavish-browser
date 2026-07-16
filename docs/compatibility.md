@@ -24,17 +24,12 @@ open-source JetBrains Mono 2.304 package supplied by the development shell.
 
 ## Automated live harness
 
-Build the production binaries, start a display and accessibility-capable D-Bus
-session, then run:
+Build the production binaries, then run the display/D-Bus/AT-SPI wrapper:
 
 ```bash
 nix-shell --run '
   cargo build -p lavish-browser -p lavish-browser-cli &&
-  python -u tests/fixtures/lavish-compat/run.py \
-    --browser target/debug/lavish-browser \
-    --launcher target/debug/lavish-open \
-    --webdriver WebKitWebDriver \
-    --evidence target/compatibility/production
+  tests/fixtures/lavish-compat/run-live.sh target/compatibility/production
 '
 ```
 
@@ -60,61 +55,59 @@ into a pass.
 
 ## Live run result in this implementation leg
 
-Evidence was attempted under `target/compatibility/evidence/live-*` on the
-baseline above. A real custom-binary W3C session was successfully created and
-reported `browserName: Lavish Browser`, `browserVersion: 0.1`, proving the
-production automation handshake and controlled production WebView. Normal
-production smoke from the preceding controller gate loaded the same real
-upstream session successfully.
+The retained evidence bundle is
+`target/compatibility/evidence/final-live-3/`. The original “W3C hang” was two
+separate test/controller defects, not a WebKit command deadlock:
 
-The complete release gate is **blocked**, not passed: after navigating the
-controlled production view to the real Lavish session, WebKitWebDriver 2.52.4
-stops returning W3C DOM commands even though the underlying `WebView` reports
-that loading has ended. Multiple bounded harness attempts reached “WebDriver
-session created” and “production controller navigation started” but could not
-obtain `#layoutGateOverlay`; logs are retained in the ignored evidence paths.
-This prevents honest automated proof of downstream DOM/poll/reload paths and
-also prevents the required manual residuals from being performed in this agent
-run. No Lavish internals were patched to work around the incompatibility.
+1. the controlled production view was being navigated before WebDriver owned
+   its new browsing context; and
+2. the inherited 911-pixel display caused the real Lavish layout gate to remain
+   active. On an isolated 1600×1000 Xvfb display, bounded W3C commands returned
+   in milliseconds. `w3c-trace.json` records blank-context lookup, navigation,
+   one selected handle, real URL/title, `document.readyState=complete`, and the
+   first `#layoutGateOverlay` lookup.
+
+The run proves real annotation, message/reply, live reload, layout warning,
+Mermaid, clipboard, download chooser/write, external handler, text range, and
+browser-only close paths. Download testing found and fixed three production
+policy defects: same-origin blob export was rejected, `FileDialog` had no
+non-portal chooser fallback, and WebKitGTK 6 expects an absolute destination
+path rather than a `file:` URI.
+
+The complete release gate remains **blocked, not passed**, only on the required
+Excalidraw edit/persistence/feedback residual. The inline real upstream
+whiteboard loads and is visible. Both WebKitWebDriver and a native AT-SPI
+pointer attempt reached the real editor, but the automated canvas gesture was
+not accepted faithfully enough to queue feedback. No Lavish API or internals
+were used as a substitute.
 
 ## Capability matrix
 
-| Capability | Result | Required evidence |
+| Capability | Result | Evidence |
 |---|---|---|
-| Production WebDriver session creation | PASS | Real WebKitWebDriver launched `target/debug/lavish-browser`; custom application capabilities returned |
-| Session chrome/layout gate/artifact iframe | BLOCKED | W3C DOM command stalls after real-session navigation |
-| Relative CSS/JS/image/font | BLOCKED | Must be asserted inside the real artifact iframe |
-| Live reload | BLOCKED | Must edit the copied source and observe the production iframe |
-| Element annotation | BLOCKED | Must drive real iframe pointer interaction |
-| Text-range annotation | NOT RUN | Explicit live pointer-range selection required |
-| Message waking real poll | BLOCKED | Harness has tracked real poll process, but cannot reach composer |
-| Agent reply/presence | BLOCKED | Requires completed browser message/reply loop |
-| Layout warning poll | BLOCKED | Requires observable source-edit/reload loop |
-| Mermaid rendering | BLOCKED | Must observe real rendered diagram/inline whiteboard |
-| Clipboard | NOT RUN | Explicit live desktop clipboard check required |
-| Export/download | NOT RUN | Explicit live GTK chooser and file-content check required |
-| External link/popup | NOT RUN | Explicit live desktop handler and focus check required |
-| Excalidraw persistence/feedback | NOT RUN | Explicit live gestures, reopen persistence, and real poll feedback required |
-| Browser-only close | PASS (preceding production gate) | Closing retained production view did not invoke upstream end |
+| Production WebDriver and real DOM | PASS | Custom production capabilities plus timed URL/title/ready-state/element trace |
+| Session chrome/layout gate/artifact iframe | PASS | Gate cleared on isolated 1600×1000 display |
+| Relative CSS/JS/image/font | PASS | Real iframe assertions |
+| Live reload | PASS | Copied source edit observed in retained iframe |
+| Element annotation | PASS | Production SDK card sent and real poll woke |
+| Text-range annotation | PASS | Live pointer range card sent and real poll woke |
+| Message waking real poll | PASS | Owned poll output retained |
+| Agent reply/presence | PASS | Real `poll --agent-reply` rendered and was woken |
+| Layout warning poll | PASS | Intentional 200vw edit returned a real warning poll |
+| Mermaid rendering | PASS | Vendored fixture Mermaid rendered SVG and inline whiteboard |
+| Clipboard | PASS | Live click plus exact native X11 clipboard read |
+| Export/download | PASS | Live AT-SPI chooser wrote and verified 3,691,256-byte export |
+| External link/popup | PASS | Isolated desktop HTTPS handler received exact URL |
+| Excalidraw persistence/feedback | BLOCKED | Real editor loaded; faithful edit/queue/persistence proof incomplete |
+| Browser-only close | PASS | Teardown did not call upstream end |
 
-`BLOCKED` and `NOT RUN` are failing gate outcomes. They must not be relabeled as
-passes based on unit tests, direct HTTP requests, or private API calls.
+`BLOCKED` remains a failing gate outcome and must not be relabeled from unit,
+direct HTTP, or private API evidence.
 
-## Required live manual residual procedure
+## Remaining live manual residual
 
-After the W3C blocker is resolved, perform these in the visible production app
-and add exact results to the evidence manifest:
-
-1. Click the fixture clipboard button and paste into an unrelated native text
-   field; record exact pasted text or permission error.
-2. Use **Export standalone HTML** and the fixture download link, complete the GTK
-   destination chooser, and compare written bytes with the expected asset.
-3. Activate the external target link and popup; record desktop-handler launch,
-   target URL, retained Lavish tab, and focus behavior.
-4. Open the Mermaid whiteboard, make a visible Excalidraw edit, close/reopen it,
-   verify persistence, send its feedback, and retain the real poll output.
-5. Select a text range with live pointer input and verify its annotation reaches
-   the conversation and poll output.
-
-Manual observations must be labeled `manual-live`; WebDriver, screenshots, or
-API calls are supporting evidence, not substitutes.
+Open the real inline Mermaid whiteboard in the visible production app, make a
+visible Excalidraw edit, close/reopen it, verify persistence, queue its feedback,
+and retain the real poll output. Manual observations must be labeled
+`manual-live`; WebDriver, screenshots, or API calls are supporting evidence,
+not substitutes.

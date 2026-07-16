@@ -145,6 +145,7 @@ impl<K: Eq + Hash, V> RetainedRegistry<K, V> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NavigationOutcome {
     Allow,
+    Download,
     External,
     Reject,
 }
@@ -183,10 +184,14 @@ impl DocumentView {
         window: &gtk::ApplicationWindow,
         emit: Rc<dyn Fn(DocumentEvent)>,
     ) -> Rc<Self> {
-        let webview = webkit6::WebView::builder()
+        let builder = webkit6::WebView::builder()
             .is_controlled_by_automation(true)
-            .automation_presentation_type(webkit6::AutomationBrowsingContextPresentation::Window)
-            .build();
+            .automation_presentation_type(webkit6::AutomationBrowsingContextPresentation::Window);
+        let webview = if let Some(session) = webkit6::NetworkSession::default() {
+            builder.network_session(&session).build()
+        } else {
+            builder.build()
+        };
         Self::new_with_webview(webview, url, identity, display_name, window, emit, false)
     }
 
@@ -350,10 +355,6 @@ impl DocumentView {
         self.webview.clone()
     }
 
-    pub fn start_automation_load(&self) {
-        self.webview.load_uri(&self.loaded_url.borrow());
-    }
-
     fn connect_signals(
         self: &Rc<Self>,
         content: &gtk::Stack,
@@ -367,8 +368,14 @@ impl DocumentView {
             let failure_message = failure_message.downgrade();
             let emit = emit.clone();
             let load_tracker = load_tracker.clone();
-            self.webview
-                .connect_load_changed(move |view, event| match event {
+            self.webview.connect_load_changed(move |view, event| {
+                if view.is_controlled_by_automation() {
+                    eprintln!(
+                        "automation WebView load event {event:?} uri={:?}",
+                        view.uri()
+                    );
+                }
+                match event {
                     webkit6::LoadEvent::Started => {
                         if let Some(event) = load_tracker.borrow().started() {
                             if let Some(content) = content.upgrade() {
@@ -424,7 +431,8 @@ impl DocumentView {
                         }
                     }
                     _ => {}
-                });
+                }
+            });
         }
         {
             let status = self.status.clone();
@@ -488,7 +496,7 @@ impl DocumentView {
 
         let allowed_url = self.loaded_url.clone();
         self.webview
-            .connect_decide_policy(move |_, decision, decision_type| {
+            .connect_decide_policy(move |view, decision, decision_type| {
                 if !matches!(
                     decision_type,
                     webkit6::PolicyDecisionType::NavigationAction
@@ -510,14 +518,22 @@ impl DocumentView {
                     return true;
                 };
                 let popup = decision_type == webkit6::PolicyDecisionType::NewWindowAction;
-                match navigation_outcome(
+                let outcome = navigation_outcome(
                     &allowed_url.borrow(),
                     &uri,
                     action.is_user_gesture(),
                     popup,
-                ) {
+                );
+                if view.is_controlled_by_automation() {
+                    eprintln!("automation navigation policy uri={uri} outcome={outcome:?}");
+                }
+                match outcome {
                     NavigationOutcome::Allow => {
                         decision.use_();
+                        true
+                    }
+                    NavigationOutcome::Download => {
+                        decision.download();
                         true
                     }
                     NavigationOutcome::External => {
@@ -544,6 +560,9 @@ impl DocumentView {
     }
 }
 
+// FileDialog requires a functioning desktop portal and has no chooser fallback;
+// the GTK dialog keeps downloads usable on plain GTK and isolated displays.
+#[allow(deprecated)]
 pub fn configure_downloads(window: &gtk::ApplicationWindow, status: &gtk::Label) {
     let Some(session) = webkit6::NetworkSession::default() else {
         return;
@@ -551,34 +570,40 @@ pub fn configure_downloads(window: &gtk::ApplicationWindow, status: &gtk::Label)
     let parent = window.clone();
     let status = status.clone();
     session.connect_download_started(move |_, download| {
+        eprintln!("WebKit download started");
         show_download_status(&status, DownloadStatus::AwaitingDestination);
         let parent = parent.clone();
         let chooser_status = status.clone();
         download.connect_decide_destination(move |download, suggested| {
-            let dialog = gtk::FileDialog::builder()
+            let dialog = gtk::FileChooserDialog::builder()
                 .title("Save Lavish download")
-                .initial_name(suggested)
+                .transient_for(&parent)
+                .modal(true)
+                .action(gtk::FileChooserAction::Save)
                 .build();
+            dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+            dialog.add_button("Save", gtk::ResponseType::Accept);
+            dialog.set_current_name(suggested);
             let download = download.clone();
             let chooser_status = chooser_status.clone();
-            dialog.save(
-                Some(&parent),
-                None::<&gio::Cancellable>,
-                move |result| match result {
-                    Ok(file) => download.set_destination(&file.uri()),
-                    Err(error) => {
+            dialog.connect_response(move |dialog, response| {
+                if response == gtk::ResponseType::Accept {
+                    if let Some(path) = dialog.file().and_then(|file| file.path()) {
+                        download.set_destination(&path.to_string_lossy());
+                    } else {
                         download.cancel();
-                        if error.matches(gio::IOErrorEnum::Cancelled) {
-                            show_download_status(&chooser_status, DownloadStatus::Cancelled);
-                        } else {
-                            show_download_status(
-                                &chooser_status,
-                                DownloadStatus::Failed(&error.to_string()),
-                            );
-                        }
+                        show_download_status(
+                            &chooser_status,
+                            DownloadStatus::Failed("no destination selected"),
+                        );
                     }
-                },
-            );
+                } else {
+                    download.cancel();
+                    show_download_status(&chooser_status, DownloadStatus::Cancelled);
+                }
+                dialog.destroy();
+            });
+            dialog.show();
             true
         });
         let started_status = status.clone();
@@ -656,6 +681,19 @@ fn navigation_outcome(
     let Ok(requested) = Url::parse(requested_url) else {
         return NavigationOutcome::Reject;
     };
+    if requested.scheme() == "blob" {
+        let Ok(blob_origin) = Url::parse(requested.path()) else {
+            return NavigationOutcome::Reject;
+        };
+        let Ok(session) = Url::parse(session_url) else {
+            return NavigationOutcome::Reject;
+        };
+        return if same_origin(&session, &blob_origin) {
+            NavigationOutcome::Download
+        } else {
+            NavigationOutcome::Reject
+        };
+    }
     if !matches!(requested.scheme(), "http" | "https") {
         return NavigationOutcome::Reject;
     }
@@ -669,16 +707,19 @@ fn navigation_outcome(
     let Ok(session) = Url::parse(session_url) else {
         return NavigationOutcome::Reject;
     };
-    let same_origin = requested.scheme() == session.scheme()
-        && requested.host_str() == session.host_str()
-        && requested.port_or_known_default() == session.port_or_known_default();
-    if same_origin {
+    if same_origin(&session, &requested) {
         NavigationOutcome::Allow
     } else if user_gesture {
         NavigationOutcome::External
     } else {
         NavigationOutcome::Reject
     }
+}
+
+fn same_origin(left: &Url, right: &Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
 }
 
 #[cfg(test)]
@@ -815,6 +856,24 @@ mod tests {
         );
         assert_eq!(
             navigation_outcome(SESSION, "https://example.com/help", false, false),
+            NavigationOutcome::Reject
+        );
+        assert_eq!(
+            navigation_outcome(
+                SESSION,
+                "blob:http://127.0.0.1:4387/99169d96-7913-4a4c-a08f-1785b26b587b",
+                false,
+                false,
+            ),
+            NavigationOutcome::Download
+        );
+        assert_eq!(
+            navigation_outcome(
+                SESSION,
+                "blob:https://example.com/99169d96-7913-4a4c-a08f-1785b26b587b",
+                true,
+                false,
+            ),
             NavigationOutcome::Reject
         );
     }
