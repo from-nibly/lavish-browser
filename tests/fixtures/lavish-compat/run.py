@@ -358,11 +358,23 @@ def main() -> int:
 
         if args.manual_excalidraw:
             artifact.write_text(original)
+            control = args.launcher.resolve().with_name("lavish-browser-ctl")
+            status = run([str(control), "status", "--json"], env=env)
+            automation_pid = json.loads(status.stdout)["state"]["process_id"]
             driver.quit()
             driver = None
             driver_process.terminate()
             driver_process.wait(timeout=10)
             driver_process = None
+            try:
+                os.kill(automation_pid, 15)
+            except ProcessLookupError:
+                pass
+            automation_deadline = time.monotonic() + 10
+            while Path(f"/proc/{automation_pid}").exists() and time.monotonic() < automation_deadline:
+                time.sleep(0.1)
+            if Path(f"/proc/{automation_pid}").exists():
+                raise RuntimeError(f"automation browser process {automation_pid} did not stop")
             socket.unlink(missing_ok=True)
 
             manual_env = env.copy()
