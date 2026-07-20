@@ -27,6 +27,12 @@ def run(argv: list[str], env: dict[str, str], *, check: bool = True, timeout: in
     return subprocess.run(argv, env=env, text=True, capture_output=True, check=check, timeout=timeout)
 
 
+def free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
 def wait_until(description: str, predicate, timeout: float = 90):
     deadline = time.monotonic() + timeout
     last = None
@@ -172,6 +178,10 @@ def main() -> int:
     data = isolated / "data"
     for directory in (runtime, state_home, config, cache, data):
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lavish_port = free_port()
+    refresh_port = free_port()
+    lavish_state = evidence / "lavish-state"
+    lavish_state.mkdir(mode=0o700)
     env.update({
         "XDG_RUNTIME_DIR": str(runtime), "XDG_STATE_HOME": str(state_home),
         "XDG_CONFIG_HOME": str(config), "XDG_CACHE_HOME": str(cache), "XDG_DATA_HOME": str(data),
@@ -179,6 +189,8 @@ def main() -> int:
         "LAVISH_BROWSER_AUTOMATION": "1",
         "LAVISH_BROWSER_MEMORY_WARNING_FILE": str(evidence / "memory-warning"),
         "LAVISH_BROWSER_CTL_TRACE": str(evidence / "control-helper.trace"),
+        "LAVISH_AXI_STATE_DIR": str(lavish_state),
+        "LAVISH_AXI_PORT": str(lavish_port),
     })
     for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
         env.pop(key, None)
@@ -258,7 +270,7 @@ def main() -> int:
         zellij_env["ZELLIJ_CONFIG_DIR"] = str(config / "zellij")
         (config / "zellij").mkdir(parents=True, exist_ok=True)
         (config / "zellij/config.kdl").write_text(
-            'simplified_ui true\nshow_startup_tips false\npane_frames false\n'
+            'simplified_ui true\nshow_startup_tips false\nshow_release_notes false\npane_frames false\n'
             'load_plugins {\n'
             f'  "file:{plugin}" {{\n'
             f'    helper_path "{ctl}"\n'
@@ -266,6 +278,7 @@ def main() -> int:
             '  }\n'
             '}\n'
         )
+        shutil.copy2(config / "zellij/config.kdl", evidence / "zellij-config.kdl")
         client_log = (evidence / "zellij-client.log").open("wb")
         zellij_client = subprocess.Popen(
             ["script", "-qefc", f"zellij --session {session} --new-session-with-layout compact", str(evidence / "zellij.typescript")],
@@ -283,11 +296,21 @@ def main() -> int:
             return f"plugin_{matches[0]['id']}" if len(matches) == 1 else None
 
         plugin_pane_id = wait_until("background load_plugins instance", background_plugin_pane, 60)
-        wait_until(
-            "visible startup plugin permission prompt",
-            lambda: b"Allow?" in (evidence / "zellij-client.log").read_bytes(),
-            60,
-        )
+        onboarding = {"show_release_notes": False, "whats_new_observed": False, "dismissed": False}
+
+        def permission_prompt_visible():
+            terminal = (evidence / "zellij-client.log").read_bytes()
+            if b"What's New" in terminal and not onboarding["dismissed"]:
+                onboarding["whats_new_observed"] = True
+                if zellij_client.stdin is None:
+                    raise RuntimeError("Zellij onboarding blocked permission prompt without writable terminal")
+                zellij_client.stdin.write(b"q")
+                zellij_client.stdin.flush()
+                onboarding["dismissed"] = True
+            return b"Allow?" in terminal
+
+        wait_until("visible startup plugin permission prompt", permission_prompt_visible, 60)
+        (evidence / "zellij-onboarding.json").write_text(json.dumps(onboarding, indent=2) + "\n")
         run([
             "zellij", "--session", session, "action", "write-chars",
             "--pane-id", plugin_pane_id, "y",
@@ -449,7 +472,7 @@ def main() -> int:
         # every matching project-scoped document and each materialized view.
         refreshed_log = evidence / "stale-refresh-launcher.log"
         refresh_command = (
-            f"LAVISH_AXI_PORT=4399 {shlex.quote(str(launcher))} {shlex.quote(str(artifact_a))} "
+            f"LAVISH_AXI_PORT={refresh_port} {shlex.quote(str(launcher))} {shlex.quote(str(artifact_a))} "
             f">{shlex.quote(str(refreshed_log))} 2>&1"
         )
         terminal_command(session, refresh_command, zellij_env)
@@ -461,7 +484,7 @@ def main() -> int:
                 for document in project["documents"] if document["source_file"] == str(artifact_a.resolve())
             ]
             return snapshot if len(documents) == 2 and all(
-                document["lifecycle"] == "ready" and ":4399/session/" in document["url"]
+                document["lifecycle"] == "ready" and f":{refresh_port}/session/" in document["url"]
                 for document in documents
             ) else None
 
@@ -486,7 +509,7 @@ def main() -> int:
         driver = webdriver_session(browser, args.webdriver_port)
         driver.get(recovered_url)
         wait = WebDriverWait(driver, 45)
-        wait.until(lambda d: ":4399/session/" in d.current_url)
+        wait.until(lambda d: f":{refresh_port}/session/" in d.current_url)
         wait.until(lambda d: d.find_element(By.ID, "chatInput").is_displayed())
         driver.save_screenshot(str(evidence / "stale-recovered-webdriver.png"))
         automation_pid = state(ctl, env)["process_id"]
@@ -494,7 +517,7 @@ def main() -> int:
         terminate_pid(automation_pid)
         (runtime / "lavish-browser/control.sock").unlink(missing_ok=True)
         process = start_browser()
-        passed("stale_url_reconnect", "all project-scoped matching views exposed native Failed/reconnect state, then ordinary installed launch on real port 4399 globally recovered them; production WebDriver loaded the recovered session")
+        passed("stale_url_reconnect", "all project-scoped matching views exposed native Failed/reconnect state, then ordinary installed launch on a real owned refresh port globally recovered them; production WebDriver loaded the recovered session")
 
         # Pair model assertions with native AT-SPI rows while both projects are visible.
         dogtail = run([sys.executable, str(root / "tests/e2e/verify_accessibility.py"), artifact_b.name], env, check=False)
@@ -531,7 +554,7 @@ def main() -> int:
             assert response.status == 200
         reopen_document_log = evidence / "native-reopen-document.log"
         terminal_command(session, (
-            f"LAVISH_AXI_PORT=4399 {shlex.quote(str(launcher))} {shlex.quote(str(artifact_a))} "
+            f"LAVISH_AXI_PORT={refresh_port} {shlex.quote(str(launcher))} {shlex.quote(str(artifact_a))} "
             f">{shlex.quote(str(reopen_document_log))} 2>&1"
         ), zellij_env)
         wait_until("ordinary reopen after native document close", lambda: shared_projects())
@@ -545,7 +568,7 @@ def main() -> int:
             assert response.status == 200
         reopen_project_log = evidence / "native-reopen-project.log"
         terminal_command(session, (
-            f"LAVISH_AXI_PORT=4399 {shlex.quote(str(launcher))} {shlex.quote(str(artifact_a))} "
+            f"LAVISH_AXI_PORT={refresh_port} {shlex.quote(str(launcher))} {shlex.quote(str(artifact_a))} "
             f">{shlex.quote(str(reopen_project_log))} 2>&1"
         ), zellij_env)
         wait_until("ordinary reopen after native project close", lambda: shared_projects())
@@ -714,7 +737,7 @@ def main() -> int:
         for artifact in (artifact_b, artifact_a):
             materialize_log = evidence / f"memory-materialize-{artifact.name}.log"
             terminal_command(session, (
-                f"LAVISH_AXI_PORT=4399 {shlex.quote(str(launcher))} {shlex.quote(str(artifact))} "
+                f"LAVISH_AXI_PORT={refresh_port} {shlex.quote(str(launcher))} {shlex.quote(str(artifact))} "
                 f">{shlex.quote(str(materialize_log))} 2>&1"
             ), zellij_env)
             wait_until(
@@ -743,9 +766,17 @@ def main() -> int:
         (evidence / "processes-after-memory.txt").write_text(processes.stdout)
         def web_rss(sample: str) -> int:
             return sum(int(parts[2]) for line in sample.splitlines() if "WebKit" in line and len(parts := line.split(None, 4)) >= 3 and parts[2].isdigit())
-        memory_metrics = {"webkit_rss_kib_before": web_rss(processes_before.stdout), "webkit_rss_kib_after": web_rss(processes.stdout)}
+        rss_before = web_rss(processes_before.stdout)
+        rss_after = web_rss(processes.stdout)
+        memory_metrics = {
+            "webkit_rss_kib_before": rss_before,
+            "webkit_rss_kib_after": rss_after,
+            "webkit_rss_kib_delta": rss_after - rss_before,
+            "rss_reduced_in_sample": rss_after < rss_before,
+            "interpretation": "point-in-time process/RSS sample; suspension is asserted separately and RSS reduction is not required or claimed",
+        }
         (evidence / "memory-metrics.json").write_text(json.dumps(memory_metrics, indent=2) + "\n")
-        passed("memory", f"critical warning suspended inactive view; WebKit RSS KiB {memory_metrics}")
+        passed("memory", f"critical warning exposed native Suspended state; retained process/RSS samples without claiming reduction: {memory_metrics}")
 
         before_restart = state(ctl, env)
         (evidence / "state-before-restart.json").write_text(json.dumps(before_restart, indent=2) + "\n")
@@ -787,8 +818,11 @@ def main() -> int:
             try: process.wait(timeout=10)
             except subprocess.TimeoutExpired: process.kill()
         browser_log.close()
-        port_4399_env = env.copy(); port_4399_env["LAVISH_AXI_PORT"] = "4399"
-        run(["npx", "-y", "lavish-axi", "stop"], port_4399_env, check=False)
+        refresh_env = env.copy(); refresh_env["LAVISH_AXI_PORT"] = str(refresh_port)
+        stopped_refresh = run(["npx", "-y", "lavish-axi", "stop"], refresh_env, check=False)
+        (evidence / "cleanup-lavish-refresh.log").write_text(stopped_refresh.stdout + stopped_refresh.stderr)
+        stopped_initial = run(["npx", "-y", "lavish-axi", "stop"], env, check=False)
+        (evidence / "cleanup-lavish-initial.log").write_text(stopped_initial.stdout + stopped_initial.stderr)
         if state_home.exists():
             shutil.copytree(state_home, evidence / "persistence-final", dirs_exist_ok=True)
         shutil.rmtree(isolated, ignore_errors=True)

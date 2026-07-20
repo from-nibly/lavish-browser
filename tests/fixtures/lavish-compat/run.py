@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,12 @@ from selenium.webdriver.webkitgtk.options import Options
 
 def run(command: list[str], *, env: dict[str, str], timeout: int = 60) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, env=env, text=True, capture_output=True, timeout=timeout, check=True)
+
+
+def free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
 
 
 def wait_for(path: Path, timeout: float = 10) -> None:
@@ -52,6 +59,28 @@ def poll(artifact: Path, env: dict[str, str], reply: str | None = None) -> subpr
 def finish(process: subprocess.Popen[str], timeout: int = 30) -> dict[str, Any]:
     stdout, stderr = process.communicate(timeout=timeout)
     return {"command_pid": process.pid, "exit_code": process.returncode, "stdout": stdout, "stderr": stderr}
+
+
+def finish_feedback_poll(
+    process: subprocess.Popen[str], artifact: Path, env: dict[str, str],
+    tracked: list[subprocess.Popen[str]], *, timeout: int = 30,
+) -> dict[str, Any]:
+    """Retry only a plain poll's transient 500; queued feedback is upstream-durable."""
+    attempts = []
+    for attempt in range(1, 4):
+        result = finish(process, timeout=timeout)
+        attempts.append(result)
+        transient_500 = result["exit_code"] != 0 and "request failed: 500" in result["stdout"].lower()
+        if not transient_500:
+            result["attempts"] = attempts
+            return result
+        if attempt == 3:
+            result["attempts"] = attempts
+            return result
+        time.sleep(attempt)
+        process = poll(artifact, env)
+        tracked.append(process)
+    raise AssertionError("unreachable poll retry loop")
 
 
 def main() -> int:
@@ -97,12 +126,17 @@ def main() -> int:
     env = os.environ.copy()
     for name in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
         env.pop(name, None)
+    upstream_state = evidence / "upstream-state"
+    upstream_state.mkdir(mode=0o700)
     env.update({
         "XDG_RUNTIME_DIR": str(runtime),
         "XDG_STATE_HOME": str(state),
         "XDG_CONFIG_HOME": str(config),
         "XDG_DATA_HOME": str(data),
         "LAVISH_BROWSER_AUTOMATION": "1",
+        "LAVISH_AXI_STATE_DIR": str(upstream_state),
+        "LAVISH_AXI_PORT": str(free_port()),
+        "LAVISH_AXI_DEBUG": "1",
     })
     subprocess.run(["update-desktop-database", str(applications)], env=env, capture_output=True)
     subprocess.run(["gio", "mime", "x-scheme-handler/http", "lavish-compat-handler.desktop"], env=env, capture_output=True)
@@ -275,7 +309,7 @@ def main() -> int:
                 tracked_polls.append(whiteboard_poll)
                 time.sleep(1)
                 driver.find_element(By.ID, "wbQueue").click()
-                whiteboard_result = finish(whiteboard_poll, timeout=120)
+                whiteboard_result = finish_feedback_poll(whiteboard_poll, artifact, env, tracked_polls, timeout=120)
                 (evidence / "poll-whiteboard.json").write_text(json.dumps(whiteboard_result, indent=2))
                 assert whiteboard_result["exit_code"] == 0 and "live Excalidraw rectangle persistence check" in whiteboard_result["stdout"]
                 driver.save_screenshot(str(evidence / "excalidraw-edited.png"))
@@ -290,7 +324,7 @@ def main() -> int:
         time.sleep(1)
         driver.find_element(By.ID, "chatInput").send_keys("webdriver compatibility message")
         driver.find_element(By.ID, "send").click()
-        message_result = finish(message_poll)
+        message_result = finish_feedback_poll(message_poll, artifact, env, tracked_polls)
         (evidence / "poll-message.json").write_text(json.dumps(message_result, indent=2))
         assert message_result["exit_code"] == 0 and "webdriver compatibility message" in message_result["stdout"]
         passed("message_poll", "browser message woke real lavish-axi poll")
@@ -307,7 +341,7 @@ def main() -> int:
         time.sleep(1)
         wait.until(lambda d: d.find_element(By.ID, "send").is_enabled())
         driver.find_element(By.ID, "send").click()
-        annotation_result = finish(annotation_poll)
+        annotation_result = finish_feedback_poll(annotation_poll, artifact, env, tracked_polls)
         (evidence / "poll-annotation.json").write_text(json.dumps(annotation_result, indent=2))
         assert annotation_result["exit_code"] == 0 and "element annotation from WebDriver" in annotation_result["stdout"]
         passed("element_annotation", "production SDK annotation was sent through and woke real poll")
@@ -324,7 +358,7 @@ def main() -> int:
         time.sleep(1)
         wait.until(lambda d: d.find_element(By.ID, "send").is_enabled())
         driver.find_element(By.ID, "send").click()
-        range_result = finish(range_poll)
+        range_result = finish_feedback_poll(range_poll, artifact, env, tracked_polls)
         (evidence / "poll-text-range.json").write_text(json.dumps(range_result, indent=2))
         assert range_result["exit_code"] == 0 and "text range from live pointer drag" in range_result["stdout"]
         results["text_range_annotation"] = {"status": "pass", "evidence": "live pointer drag created a text-range SDK card and real poll received it", "classification": "live-gui-pointer"}
@@ -348,7 +382,7 @@ def main() -> int:
         warning_poll = poll(artifact, env)
         tracked_polls.append(warning_poll)
         artifact.write_text(artifact.read_text().replace("</main>", '<div id="overflow" style="width: 200vw">overflow gate</div></main>'))
-        warning_result = finish(warning_poll, timeout=45)
+        warning_result = finish_feedback_poll(warning_poll, artifact, env, tracked_polls, timeout=45)
         (evidence / "poll-layout-warning.json").write_text(json.dumps(warning_result, indent=2))
         assert warning_result["exit_code"] == 0 and "layout" in warning_result["stdout"].lower()
         passed("layout_warning_poll", "real poll returned after intentional 200vw source overflow")
@@ -466,6 +500,11 @@ def main() -> int:
         for process in tracked_polls:
             if process.poll() is None:
                 process.terminate()
+        for process in tracked_polls:
+            if process.poll() is None:
+                try: process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill(); process.wait(timeout=5)
         if driver is not None:
             try:
                 driver.quit()
@@ -479,6 +518,14 @@ def main() -> int:
                 driver_process.kill()
         if browser.poll() is None:
             browser.terminate()
+            try: browser.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                browser.kill(); browser.wait(timeout=5)
+        stopped = subprocess.run(
+            ["npx", "-y", "lavish-axi", "stop"], env=env,
+            text=True, capture_output=True, timeout=30,
+        )
+        (evidence / "upstream-stop.log").write_text(stopped.stdout + stopped.stderr)
         browser_log.close()
         if manual_browser_log is not None:
             manual_browser_log.close()
