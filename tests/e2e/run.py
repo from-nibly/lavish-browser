@@ -739,8 +739,10 @@ def main() -> int:
         for artifact in (artifact_b, artifact_a):
             materialize_log = evidence / f"memory-materialize-{artifact.name}.log"
             terminal_command(session, (
+                "for attempt in 1 2 3; do "
                 f"LAVISH_AXI_PORT={refresh_port} {shlex.quote(str(launcher))} {shlex.quote(str(artifact))} "
-                f">{shlex.quote(str(materialize_log))} 2>&1"
+                f">>{shlex.quote(str(materialize_log))} 2>&1 && exit 0; "
+                "sleep $attempt; done; exit 1"
             ), zellij_env)
             wait_until(
                 f"materialized {artifact.name} before memory warning",
