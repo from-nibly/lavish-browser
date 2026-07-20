@@ -641,7 +641,12 @@ def main() -> int:
             ["xmessage", "-name", "lavish-e2e-focus-reference", "Lavish E2E focus reference"],
             env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-        focus_before = wait_until("managed reference window focus", lambda: active_window(env), 20)
+        def focused_reference_window():
+            window = active_window(env)
+            properties = run(["xprop", "-id", window, "WM_NAME", "WM_CLASS"], env, check=False)
+            return window if '"Xmessage"' in properties.stdout and "lavish-e2e-focus-reference" in properties.stdout else None
+
+        focus_before = wait_until("managed reference window focus", focused_reference_window, 20)
         reference_properties = run(["xprop", "-id", focus_before, "WM_NAME", "WM_CLASS"], env)
         (evidence / "focus-reference-window.txt").write_text(reference_properties.stdout)
         focus_state_before = run([sys.executable, str(root / "tests/e2e/focus_accessibility.py")], env).stdout.strip()
