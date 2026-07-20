@@ -290,6 +290,7 @@ def main() -> int:
             results["excalidraw"] = {"status": "blocked", "evidence": "waiting for explicit live human observation and real poll output", "classification": "manual-required"}
             driver.switch_to.default_content()
         else:
+            whiteboard_poll = None
             try:
                 driver.switch_to.frame(whiteboard)
                 w3c("whiteboard.inline_ready", lambda: wait.until(lambda d: d.find_element(By.ID, "wbQueue").is_displayed()))
@@ -313,6 +314,11 @@ def main() -> int:
                 driver.save_screenshot(str(evidence / "excalidraw-edited.png"))
                 results["excalidraw"] = {"status": "pass", "evidence": "live canvas rectangle gesture autosaved and Queue feedback woke real poll with the note; screenshot retained", "classification": "live-gui-pointer"}
             except Exception as error:
+                if whiteboard_poll is not None and whiteboard_poll.poll() is None:
+                    whiteboard_poll.terminate()
+                    try: whiteboard_poll.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        whiteboard_poll.kill(); whiteboard_poll.wait(timeout=5)
                 results["excalidraw"] = {"status": "blocked", "evidence": f"{type(error).__name__}: WebKitWebDriver pointer gesture was not faithful; explicit live manual gesture required", "classification": "manual-required"}
             finally:
                 driver.switch_to.default_content()

@@ -52,6 +52,8 @@ def main():
         bool(memory.get("exited_webkit_pids")) or memory.get("meaningful_pss_decrease") is True,
         memory.get("release_observed_by") in ("process_exit", "meaningful_pss_decrease"),
         memory.get("resume_click_count") == 1,
+        memory.get("resume_button_count_before", 0) >= 1,
+        memory.get("resume_button_count_after") == memory.get("resume_button_count_before", 0) - 1,
         memory.get("resume_document_matches") == 1,
         memory.get("resume_lifecycle") in ("ready", "failed"),
         memory.get("fresh_view_observed") is True,

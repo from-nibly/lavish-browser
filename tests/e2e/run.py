@@ -872,29 +872,41 @@ def main() -> int:
                 f"exited={exited_pids}, pss_decrease={pss_decrease} KiB"
             )
 
-        resume_artifact = memory_artifacts[0]
-        resume_name = f"Resume suspended document {resume_artifact.name}"
-        native(root, env, "click", resume_name)
+        suspended_sources = {
+            document["source_file"] for project in suspended["projects"] for document in project["documents"]
+            if document["lifecycle"] == "suspended"
+        }
+        pre_atspi = json.loads((evidence / "atspi-suspended.json").read_text())
+        pre_resume_buttons = sum(entry["role"] == "button" and entry["name"] == "Resume" for entry in pre_atspi)
+        native(root, env, "click", "Resume")
         resume_observations = []
+        resumed_source = None
 
         def resumed_snapshot():
+            nonlocal resumed_source
             snapshot = state(ctl, env)
-            matches = [
+            resumed_documents = [
                 document for project in snapshot["projects"] for document in project["documents"]
-                if document["source_file"] == str(resume_artifact.resolve())
+                if document["source_file"] in suspended_sources and document["lifecycle"] in ("ready", "failed")
             ]
-            resume_observations.append([document["lifecycle"] for document in matches])
-            return snapshot if len(matches) == 1 and matches[0]["lifecycle"] in ("ready", "failed") else None
+            resume_observations.append({document["source_file"]: document["lifecycle"] for document in resumed_documents})
+            if len(resumed_documents) == 1:
+                resumed_source = resumed_documents[0]["source_file"]
+                return snapshot
+            return None
 
         resumed = wait_until("AT-SPI suspended document resume", resumed_snapshot, 180)
         (evidence / "state-after-memory-resume.json").write_text(json.dumps(resumed, indent=2) + "\n")
-        native(root, env, "absent", resume_name)
+        native(root, env, "snapshot", output=evidence / "atspi-after-memory-resume.json")
+        post_atspi = json.loads((evidence / "atspi-after-memory-resume.json").read_text())
+        post_resume_buttons = sum(entry["role"] == "button" and entry["name"] == "Resume" for entry in post_atspi)
+        if post_resume_buttons != pre_resume_buttons - 1:
+            raise RuntimeError(f"native Resume action count did not decrease exactly once: {pre_resume_buttons}->{post_resume_buttons}")
         resumed_lifecycle = next(
             document["lifecycle"] for project in resumed["projects"] for document in project["documents"]
-            if document["source_file"] == str(resume_artifact.resolve())
+            if document["source_file"] == resumed_source
         )
         native(root, env, "assert", "Ready" if resumed_lifecycle == "ready" else "Reconnect document")
-        native(root, env, "snapshot", output=evidence / "atspi-after-memory-resume.json")
         resume_samples = []
         for _ in range(8):
             resume_samples.append(sample_webkit_processes())
@@ -924,8 +936,11 @@ def main() -> int:
             "pss_decrease_kib": pss_decrease,
             "meaningful_pss_decrease": meaningful_decrease,
             "release_observed_by": "process_exit" if exited_pids else "meaningful_pss_decrease",
-            "resume_action": resume_name,
+            "resume_action": "Resume",
             "resume_click_count": 1,
+            "resume_button_count_before": pre_resume_buttons,
+            "resume_button_count_after": post_resume_buttons,
+            "resume_document_source": resumed_source,
             "resume_document_matches": 1,
             "resume_lifecycle": resumed_lifecycle,
             "resume_observed_lifecycles": resume_observations,
