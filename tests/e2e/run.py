@@ -279,7 +279,11 @@ def main() -> int:
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 if (runtime / "lavish-browser/control.sock").exists():
-                    return candidate
+                    try:
+                        state(ctl, env)
+                        return candidate
+                    except Exception:
+                        pass
                 if candidate.poll() is not None:
                     break
                 time.sleep(.1)
