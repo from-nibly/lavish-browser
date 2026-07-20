@@ -96,23 +96,17 @@ if not blocked <= {"excalidraw", "download"}:
     raise SystemExit(f"unexpected automated compatibility blockers: {sorted(blocked)}")
 PY
 
-if ((integration_status == 0 && automated_ready == 1)) && [[ ${LAVISH_MANUAL_EXCALIDRAW:-0} == 1 ]]; then
-  if [[ -z ${LAVISH_MANUAL_DISPLAY:-} ]] || ! xdpyinfo -display "$LAVISH_MANUAL_DISPLAY" >/dev/null 2>&1; then
-    echo "FAIL: LAVISH_MANUAL_DISPLAY must name a reachable visible display" | tee "$evidence/logs/manual-residual.log"
-    compatibility_status=1
-  else
-    echo "All non-manual installed capabilities passed; starting bounded visible Excalidraw residual on $LAVISH_MANUAL_DISPLAY." | tee "$evidence/logs/manual-residual.log"
-  python -u "$root/tests/fixtures/lavish-compat/run.py" \
-    --browser "$prefix/bin/lavish-browser" \
-    --launcher "$prefix/bin/lavish-open" \
-    --evidence "$evidence/compatibility-manual" \
-      --port "${LAVISH_MANUAL_WEBDRIVER_PORT:-9597}" \
-      --manual-excalidraw --manual-display "$LAVISH_MANUAL_DISPLAY" \
-      2>&1 | tee -a "$evidence/logs/manual-residual.log"
-    compatibility_status=${PIPESTATUS[0]}
-  fi
+manual_evidence=${LAVISH_E2E_MANUAL_EVIDENCE:-$root/target/e2e/manual-direct-relaunch}
+capability_status=1
+if ((integration_status == 0 && automated_ready == 1)) && \
+  python -u "$root/tests/e2e/generate_installed_capabilities.py" \
+    --automated-root "$evidence" --manual-root "$manual_evidence" \
+    --output "$evidence/installed-capabilities.json" \
+    2>&1 | tee "$evidence/logs/capability-generator.log"; then
+  compatibility_status=0
+  capability_status=0
 elif ((integration_status == 0 && automated_ready == 1)); then
-  echo "BLOCKED: all automated checks passed; rerun with LAVISH_MANUAL_EXCALIDRAW=1 and complete the visible rectangle gesture." | tee "$evidence/logs/manual-residual.log"
+  echo "FAIL: automated scenarios passed but exact-hash manual Excalidraw evidence did not validate." | tee "$evidence/logs/manual-residual.log"
   compatibility_status=1
 fi
 set -e
@@ -125,6 +119,7 @@ cat >"$evidence/manifest.json" <<EOF
   "display": "$display",
   "compatibility_status": $compatibility_status,
   "integration_status": $integration_status,
+  "capability_status": $capability_status,
   "compatibility_evidence": "$evidence/compatibility",
   "integration_evidence": "$evidence/integration"
 }

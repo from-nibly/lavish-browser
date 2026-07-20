@@ -9,10 +9,18 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
+
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.remote.client_config import ClientConfig
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.webkitgtk.options import Options
 
 
 def run(argv: list[str], env: dict[str, str], *, check: bool = True, timeout: int = 120) -> subprocess.CompletedProcess[str]:
@@ -51,6 +59,65 @@ def terminal_command(session: str, command: str, env: dict[str, str]) -> None:
         "zellij", "--session", session, "action", "new-pane", "--close-on-exit",
         "--", "bash", "-lc", command,
     ], env)
+
+
+def browser_request(runtime: Path, command: dict) -> dict:
+    request = {
+        "protocol_version": 1,
+        "request_id": f"e2e-{time.monotonic_ns()}",
+        "command": command,
+    }
+    with socket.socket(socket.AF_UNIX) as client:
+        client.settimeout(10)
+        client.connect(str(runtime / "lavish-browser/control.sock"))
+        client.sendall(json.dumps(request).encode() + b"\n")
+        response = b""
+        while not response.endswith(b"\n"):
+            chunk = client.recv(65536)
+            if not chunk:
+                break
+            response += chunk
+    envelope = json.loads(response)
+    if envelope.get("status") not in ("ok", "ignored"):
+        raise RuntimeError(f"browser request failed: {envelope}")
+    return envelope
+
+
+def native(root: Path, env: dict[str, str], command: str, needle: str = "", *, timeout: int = 30, output: Path | None = None):
+    argv = [sys.executable, str(root / "tests/e2e/native_accessibility.py"), command]
+    if needle:
+        argv.append(needle)
+    argv += ["--timeout", str(timeout)]
+    if output:
+        argv += ["--output", str(output)]
+    return run(argv, env, timeout=timeout + 5)
+
+
+def terminate_pid(pid: int, timeout: float = 10):
+    try:
+        os.kill(pid, 15)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try: os.kill(pid, 0)
+        except ProcessLookupError: return
+        time.sleep(.1)
+    try: os.kill(pid, 9)
+    except ProcessLookupError: pass
+
+
+def webdriver_session(browser: Path, port: int):
+    options = Options()
+    options.binary_location = str(browser)
+    options.page_load_strategy = "none"
+    options.set_capability("browserName", "Lavish Browser")
+    endpoint = f"http://127.0.0.1:{port}"
+    return webdriver.Remote(
+        command_executor=endpoint,
+        options=options,
+        client_config=ClientConfig(remote_server_addr=endpoint, timeout=45),
+    )
 
 
 def main() -> int:
@@ -109,6 +176,7 @@ def main() -> int:
         "XDG_RUNTIME_DIR": str(runtime), "XDG_STATE_HOME": str(state_home),
         "XDG_CONFIG_HOME": str(config), "XDG_CACHE_HOME": str(cache), "XDG_DATA_HOME": str(data),
         "LAVISH_BROWSER_EXECUTABLE": str(browser),
+        "LAVISH_BROWSER_AUTOMATION": "1",
         "LAVISH_BROWSER_MEMORY_WARNING_FILE": str(evidence / "memory-warning"),
         "LAVISH_BROWSER_CTL_TRACE": str(evidence / "control-helper.trace"),
     })
@@ -162,6 +230,9 @@ def main() -> int:
     process = start_browser()
     session = f"lavish-e2e-{os.getpid()}"
     zellij_client = None
+    webdriver_process = None
+    driver = None
+    ctl_disabled = None
     scenarios: dict[str, dict[str, str]] = {}
 
     def passed(name: str, detail: str) -> None:
@@ -242,6 +313,189 @@ def main() -> int:
         assert sum(len(p["documents"]) for p in after["projects"]) == before_count
         passed("dedupe", "reopening canonical source did not add a document")
 
+        # Materialize the same canonical source in both real Zellij projects. The
+        # launcher still delegates to one unchanged upstream Lavish session.
+        shared_log = evidence / "zellij-open-shared.log"
+        shared_command = f"{shlex.quote(str(launcher))} {shlex.quote(str(artifact_a))} >{shlex.quote(str(shared_log))} 2>&1"
+        terminal_command(session, shared_command, zellij_env)
+
+        def shared_projects():
+            snapshot = state(ctl, env)
+            matches = [
+                project for project in snapshot["projects"]
+                if any(document["source_file"] == str(artifact_a.resolve()) for document in project["documents"])
+                and project["key"].get("kind") == "zellij"
+            ]
+            return (snapshot, matches) if len(matches) == 2 else None
+
+        _, matching_projects = wait_until("shared canonical source in two projects", shared_projects, 180)
+        shared_keys = [project["key"] for project in matching_projects]
+        shared_urls = {
+            document["url"]
+            for project in matching_projects
+            for document in project["documents"]
+            if document["source_file"] == str(artifact_a.resolve())
+        }
+        if len(shared_urls) != 1:
+            raise RuntimeError(f"shared source did not use one upstream session: {shared_urls}")
+
+        webdriver_log = (evidence / "integration-webdriver.log").open("w")
+        webdriver_process = subprocess.Popen(
+            ["WebKitWebDriver", f"--port={args.webdriver_port}"],
+            env=env, stdout=webdriver_log, stderr=subprocess.STDOUT,
+        )
+        time.sleep(1)
+        first = shared_keys[0]
+        run([str(ctl), "select-project", first["session_name"], str(first["stable_tab_id"])], env)
+        time.sleep(1)
+        process.terminate(); process.wait(timeout=15)
+        (runtime / "lavish-browser/control.sock").unlink(missing_ok=True)
+        driver = webdriver_session(browser, args.webdriver_port)
+        driver.get(next(iter(shared_urls)))
+        wait = WebDriverWait(driver, 45)
+        wait.until(lambda d: d.find_element(By.ID, "chatInput").is_displayed())
+        shared_poll = subprocess.Popen(
+            ["npx", "-y", "lavish-axi", "poll", str(artifact_a.resolve())],
+            env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        time.sleep(1)
+        shared_message = "installed shared-session duplicate feedback"
+        driver.find_element(By.ID, "chatInput").send_keys(shared_message)
+        driver.find_element(By.ID, "send").click()
+        poll_stdout, poll_stderr = shared_poll.communicate(timeout=120)
+        (evidence / "shared-session-poll.txt").write_text(poll_stdout + poll_stderr)
+        if shared_poll.returncode or shared_message not in poll_stdout:
+            raise RuntimeError("shared-session browser feedback did not wake real upstream poll")
+        driver.save_screenshot(str(evidence / "shared-session-first-project.png"))
+        automation_pid = state(ctl, env)["process_id"]
+        driver.quit(); driver = None
+        terminate_pid(automation_pid)
+        (runtime / "lavish-browser/control.sock").unlink(missing_ok=True)
+        process = start_browser()
+
+        second = shared_keys[1]
+        run([str(ctl), "select-project", second["session_name"], str(second["stable_tab_id"])], env)
+        time.sleep(1)
+        process.terminate(); process.wait(timeout=15)
+        (runtime / "lavish-browser/control.sock").unlink(missing_ok=True)
+        driver = webdriver_session(browser, args.webdriver_port)
+        driver.get(next(iter(shared_urls)))
+        wait = WebDriverWait(driver, 45)
+        wait.until(lambda d: shared_message in d.find_element(By.ID, "chatLog").text)
+        driver.save_screenshot(str(evidence / "shared-session-second-project.png"))
+        (evidence / "shared-session.json").write_text(json.dumps({
+            "canonical_source": str(artifact_a.resolve()),
+            "project_keys": shared_keys,
+            "session_url": next(iter(shared_urls)),
+            "poll_exit_code": shared_poll.returncode,
+            "message_visible_in_second_retained_view": True,
+        }, indent=2) + "\n")
+        automation_pid = state(ctl, env)["process_id"]
+        driver.quit(); driver = None
+        terminate_pid(automation_pid)
+        (runtime / "lavish-browser/control.sock").unlink(missing_ok=True)
+        process = start_browser()
+        passed("shared_session_feedback", "one real upstream session in two retained project views; first-view feedback woke real poll and appeared in the second view")
+
+        # Re-materialize both project-scoped views after the WebDriver-owned
+        # process cycles; startup restoration is intentionally lazy.
+        for key in shared_keys:
+            run([str(ctl), "select-project", key["session_name"], str(key["stable_tab_id"])], env)
+            wait_until(
+                f"materialized shared view {key}",
+                lambda key=key: next(
+                    (
+                        document for project in state(ctl, env)["projects"] if project["key"] == key
+                        for document in project["documents"]
+                        if document["source_file"] == str(artifact_a.resolve()) and document["lifecycle"] == "ready"
+                    ),
+                    None,
+                ),
+                90,
+            )
+
+        # Stop the original real upstream server, then globally replace the
+        # canonical source with a syntactically valid but unavailable loopback
+        # URL. OpenUrl is the public browser-control contract, not a Lavish API.
+        stopped = run(["npx", "-y", "lavish-axi", "stop"], env, check=False)
+        (evidence / "stale-stop-upstream.log").write_text(stopped.stdout + stopped.stderr)
+        stale_url = "http://127.0.0.1:9/session/installed-stale"
+        browser_request(runtime, {
+            "type": "open_url",
+            "project": {"key": first, "label": matching_projects[0]["label"], "raw_tab_name": None},
+            "source_file": str(artifact_a.resolve()),
+            "url": stale_url,
+        })
+
+        def all_matching_lifecycle(expected: str, expected_url: str):
+            snapshot = state(ctl, env)
+            documents = [
+                document for project in snapshot["projects"] if project["key"].get("kind") == "zellij"
+                for document in project["documents"] if document["source_file"] == str(artifact_a.resolve())
+            ]
+            return snapshot if len(documents) == 2 and all(
+                document["lifecycle"] == expected and document["url"] == expected_url
+                for document in documents
+            ) else None
+
+        failed = wait_until("all shared views showing stale failure", lambda: all_matching_lifecycle("failed", stale_url), 90)
+        (evidence / "state-stale-failed.json").write_text(json.dumps(failed, indent=2) + "\n")
+        native(root, env, "assert", "Failed", output=None)
+        native(root, env, "assert", "Reconnect document")
+        native(root, env, "snapshot", output=evidence / "atspi-stale-failed.json")
+
+        # Reacquire the same canonical session through the ordinary installed
+        # launcher on a different real upstream port. The browser model updates
+        # every matching project-scoped document and each materialized view.
+        refreshed_log = evidence / "stale-refresh-launcher.log"
+        refresh_command = (
+            f"LAVISH_AXI_PORT=4399 {shlex.quote(str(launcher))} {shlex.quote(str(artifact_a))} "
+            f">{shlex.quote(str(refreshed_log))} 2>&1"
+        )
+        terminal_command(session, refresh_command, zellij_env)
+
+        def refreshed_snapshot():
+            snapshot = state(ctl, env)
+            documents = [
+                document for project in snapshot["projects"] if project["key"].get("kind") == "zellij"
+                for document in project["documents"] if document["source_file"] == str(artifact_a.resolve())
+            ]
+            return snapshot if len(documents) == 2 and all(
+                document["lifecycle"] == "ready" and ":4399/session/" in document["url"]
+                for document in documents
+            ) else None
+
+        refreshed = wait_until("global stale URL recovery", refreshed_snapshot, 180)
+        (evidence / "state-stale-recovered.json").write_text(json.dumps(refreshed, indent=2) + "\n")
+        native(root, env, "assert", "Ready")
+        native(root, env, "absent", "Reconnect document")
+        native(root, env, "snapshot", output=evidence / "atspi-stale-recovered.json")
+        recovered_urls = {
+            document["url"] for project in refreshed["projects"] for document in project["documents"]
+            if document["source_file"] == str(artifact_a.resolve())
+        }
+        if len(recovered_urls) != 1:
+            raise RuntimeError(f"global refresh diverged across projects: {recovered_urls}")
+        recovered_url = next(iter(recovered_urls))
+        with urllib.request.urlopen(recovered_url, timeout=10) as response:
+            if response.status != 200:
+                raise RuntimeError(f"recovered upstream returned HTTP {response.status}")
+        time.sleep(1)
+        process.terminate(); process.wait(timeout=15)
+        (runtime / "lavish-browser/control.sock").unlink(missing_ok=True)
+        driver = webdriver_session(browser, args.webdriver_port)
+        driver.get(recovered_url)
+        wait = WebDriverWait(driver, 45)
+        wait.until(lambda d: ":4399/session/" in d.current_url)
+        wait.until(lambda d: d.find_element(By.ID, "chatInput").is_displayed())
+        driver.save_screenshot(str(evidence / "stale-recovered-webdriver.png"))
+        automation_pid = state(ctl, env)["process_id"]
+        driver.quit(); driver = None
+        terminate_pid(automation_pid)
+        (runtime / "lavish-browser/control.sock").unlink(missing_ok=True)
+        process = start_browser()
+        passed("stale_url_reconnect", "all project-scoped matching views exposed native Failed/reconnect state, then ordinary installed launch on real port 4399 globally recovered them; production WebDriver loaded the recovered session")
+
         # Pair model assertions with native AT-SPI rows while both projects are visible.
         dogtail = run([sys.executable, str(root / "tests/e2e/verify_accessibility.py"), artifact_b.name], env, check=False)
         (evidence / "accessibility.log").write_text(dogtail.stdout + dogtail.stderr)
@@ -258,6 +512,51 @@ def main() -> int:
         if native_download.returncode or not native_export.is_file() or "<!doctype html" not in native_export.read_text().lower():
             raise RuntimeError("installed native AT-SPI export failed; see native-download.log")
         passed("native_download", f"AT-SPI chooser wrote {native_export.stat().st_size} byte installed export")
+
+        # Drive native document and project close controls. Closing browser
+        # metadata must not call upstream end; ordinary lavish-open (without
+        # --reopen) restores each surface while the real server remains alive.
+        second_project = next(project for project in state(ctl, env)["projects"] if project["key"] == second)
+        identity_text = f"Zellij session {session}, tab {second['stable_tab_id']}"
+        document_close_name = f"Close document {artifact_a.name}, {identity_text}"
+        native(root, env, "click", document_close_name)
+
+        def document_closed():
+            project = next((item for item in state(ctl, env)["projects"] if item["key"] == second), None)
+            return project if project and all(document["source_file"] != str(artifact_a.resolve()) for document in project["documents"]) else None
+
+        wait_until("native document close", document_closed)
+        native(root, env, "absent", document_close_name)
+        with urllib.request.urlopen(recovered_url, timeout=10) as response:
+            assert response.status == 200
+        reopen_document_log = evidence / "native-reopen-document.log"
+        terminal_command(session, (
+            f"LAVISH_AXI_PORT=4399 {shlex.quote(str(launcher))} {shlex.quote(str(artifact_a))} "
+            f">{shlex.quote(str(reopen_document_log))} 2>&1"
+        ), zellij_env)
+        wait_until("ordinary reopen after native document close", lambda: shared_projects())
+        native(root, env, "assert", document_close_name)
+
+        project_close_name = f"Close project {second_project['label']}, {identity_text}"
+        native(root, env, "click", project_close_name)
+        wait_until("native project close", lambda: second if all(project["key"] != second for project in state(ctl, env)["projects"]) else None)
+        native(root, env, "absent", project_close_name)
+        with urllib.request.urlopen(recovered_url, timeout=10) as response:
+            assert response.status == 200
+        reopen_project_log = evidence / "native-reopen-project.log"
+        terminal_command(session, (
+            f"LAVISH_AXI_PORT=4399 {shlex.quote(str(launcher))} {shlex.quote(str(artifact_a))} "
+            f">{shlex.quote(str(reopen_project_log))} 2>&1"
+        ), zellij_env)
+        wait_until("ordinary reopen after native project close", lambda: shared_projects())
+        native(root, env, "assert", project_close_name)
+        native(root, env, "snapshot", output=evidence / "atspi-after-native-reopen.json")
+        (evidence / "native-reopen-argv.json").write_text(json.dumps({
+            "document": [str(launcher), str(artifact_a)],
+            "project": [str(launcher), str(artifact_a)],
+            "contains_reopen_flag": False,
+        }, indent=2) + "\n")
+        passed("native_close_reopen", "AT-SPI document/project close controls removed visible native state; upstream stayed HTTP-live and ordinary installed lavish-open restored both without --reopen")
 
         # Exercise the installed real background plugin. Lifecycle delivery and
         # trace-plugin-event entries below prove permission/readiness/event flow.
@@ -299,6 +598,90 @@ def main() -> int:
             "presentation_before": presentation_before, "presentation_after": presentation_after,
         }, indent=2) + "\n")
 
+        # Optional integration must degrade quietly. First remove the installed
+        # helper and emit changed/unchanged active events. No helper process can
+        # run, the browser must not be launched/replaced, and Zellij stays live.
+        degradation = {}
+        ctl_disabled = ctl.with_name("lavish-browser-ctl.disabled-e2e")
+        ctl.rename(ctl_disabled)
+        trace_before_missing = helper_trace.read_text().splitlines()
+        pid_before_missing = process.pid
+        focus_before_missing = active_window(env)
+        run(["zellij", "--session", session, "action", "go-to-tab", "2"], zellij_env)
+        run(["zellij", "--session", session, "action", "go-to-tab", "2"], zellij_env)
+        run(["zellij", "--session", session, "action", "go-to-tab", "1"], zellij_env)
+        run(["zellij", "--session", session, "action", "new-tab", "--name", "MissingHelperUnknown"], zellij_env)
+        time.sleep(1)
+        run(["zellij", "--session", session, "action", "close-pane"], zellij_env)
+        time.sleep(3)
+        if process.poll() is not None or process.pid != pid_before_missing:
+            raise RuntimeError("missing helper disturbed or replaced the browser")
+        if helper_trace.read_text().splitlines() != trace_before_missing:
+            raise RuntimeError("missing helper unexpectedly wrote lifecycle trace")
+        if session not in run(["zellij", "list-sessions", "--short", "--no-formatting"], zellij_env).stdout:
+            raise RuntimeError("missing helper destabilized Zellij")
+        focus_after_missing = active_window(env)
+        if focus_after_missing != focus_before_missing:
+            raise RuntimeError("missing helper lifecycle changed desktop focus")
+        degradation["missing_helper"] = {
+            "browser_pid_unchanged": True,
+            "trace_growth": 0,
+            "events_exercised": ["active", "unchanged", "unknown", "close"],
+            "focus_before": focus_before_missing,
+            "focus_after": focus_after_missing,
+        }
+        ctl_disabled.rename(ctl); ctl_disabled = None
+
+        # Next stop only the browser and exercise active/unchanged events while
+        # the restored helper has no socket. The helper never starts the app and
+        # event coalescing bounds invocations. Restore the browser, then prove a
+        # later changed event recovers normal selection.
+        process.terminate(); process.wait(timeout=15)
+        (runtime / "lavish-browser/control.sock").unlink(missing_ok=True)
+        lifecycle_before_stopped = sum(
+            "\tselect-project\t" in line or "\tclose-project\t" in line
+            for line in helper_trace.read_text().splitlines()
+        )
+        focus_before_stopped = active_window(env)
+        run(["zellij", "--session", session, "action", "go-to-tab", "2"], zellij_env)
+        run(["zellij", "--session", session, "action", "go-to-tab", "2"], zellij_env)
+        run(["zellij", "--session", session, "action", "go-to-tab", "1"], zellij_env)
+        run(["zellij", "--session", session, "action", "new-tab", "--name", "StoppedBrowserUnknown"], zellij_env)
+        time.sleep(1)
+        run(["zellij", "--session", session, "action", "close-pane"], zellij_env)
+        time.sleep(3)
+        if (runtime / "lavish-browser/control.sock").exists() or process.poll() is None:
+            raise RuntimeError("plugin helper launched a browser while the browser was stopped")
+        stopped_growth = sum(
+            "\tselect-project\t" in line or "\tclose-project\t" in line
+            for line in helper_trace.read_text().splitlines()
+        ) - lifecycle_before_stopped
+        if stopped_growth > 4:
+            raise RuntimeError(f"plugin/helper retry storm while browser absent: {stopped_growth} calls")
+        process = start_browser()
+        restored_after_dependency = wait_until("browser restore after optional dependency test", lambda: state(ctl, env))
+        zellij_projects = [project for project in restored_after_dependency["projects"] if session in json.dumps(project["key"])]
+        recovery_key = zellij_projects[0]["key"]
+        ordered_ids = sorted(project["key"]["stable_tab_id"] for project in zellij_projects)
+        recovery_tab_position = str(ordered_ids.index(recovery_key["stable_tab_id"]) + 1)
+        other_tab_position = "2" if recovery_tab_position == "1" else "1"
+        run(["zellij", "--session", session, "action", "go-to-tab", other_tab_position], zellij_env)
+        run(["zellij", "--session", session, "action", "go-to-tab", recovery_tab_position], zellij_env)
+        wait_until("plugin recovery after browser restore", lambda: selected_snapshot(recovery_key))
+        focus_after_stopped = active_window(env)
+        if focus_after_stopped != focus_before_stopped:
+            raise RuntimeError("browser-absent plugin lifecycle changed desktop focus")
+        degradation["stopped_browser"] = {
+            "helper_invocation_growth": stopped_growth,
+            "browser_not_launched_by_helper": True,
+            "events_exercised": ["active", "unchanged", "unknown", "close"],
+            "focus_before": focus_before_stopped,
+            "focus_after": focus_after_stopped,
+            "recovered_selected_project": recovery_key,
+        }
+        (evidence / "plugin-degradation.json").write_text(json.dumps(degradation, indent=2) + "\n")
+        passed("plugin_degradation", "real plugin remained quiet with installed helper missing and browser stopped, emitted no retry storm or browser launch/focus change, and recovered after dependencies returned")
+
         # A new tab has no browser project and therefore must not change selection.
         run(["zellij", "--session", session, "action", "new-tab", "--name", "Unknown"], zellij_env)
         time.sleep(2)
@@ -323,6 +706,25 @@ def main() -> int:
             f"real plugin selected/ignored/closed one-way; X={focus_before}; AT-SPI={focus_state_before}; presentations={presentation_before}",
         )
 
+        # Ensure the surviving project has two materialized real WebViews after
+        # the dependency-recovery process restart: open B, then A so B is the
+        # deterministic inactive suspension candidate.
+        for artifact in (artifact_b, artifact_a):
+            materialize_log = evidence / f"memory-materialize-{artifact.name}.log"
+            terminal_command(session, (
+                f"LAVISH_AXI_PORT=4399 {shlex.quote(str(launcher))} {shlex.quote(str(artifact))} "
+                f">{shlex.quote(str(materialize_log))} 2>&1"
+            ), zellij_env)
+            wait_until(
+                f"materialized {artifact.name} before memory warning",
+                lambda artifact=artifact: next((
+                    document for project in state(ctl, env)["projects"]
+                    for document in project["documents"]
+                    if document["source_file"] == str(artifact.resolve()) and document["lifecycle"] == "ready"
+                ), None),
+                180,
+            )
+
         processes_before = run(["ps", "-eo", "pid,ppid,rss,comm,args"], env, check=False)
         (evidence / "processes-before-memory.txt").write_text(processes_before.stdout)
         (evidence / "memory-warning").write_text("1 critical\n")
@@ -333,6 +735,8 @@ def main() -> int:
 
         suspended = wait_until("memory suspension", suspended_snapshot)
         (evidence / "state-after-memory.json").write_text(json.dumps(suspended, indent=2) + "\n")
+        native(root, env, "assert", "Suspended")
+        native(root, env, "snapshot", output=evidence / "atspi-suspended.json")
         processes = run(["ps", "-eo", "pid,ppid,rss,comm,args"], env, check=False)
         (evidence / "processes-after-memory.txt").write_text(processes.stdout)
         def web_rss(sample: str) -> int:
@@ -353,9 +757,24 @@ def main() -> int:
 
         restored = wait_until("persisted projects", restored_snapshot)
         (evidence / "state-after-restart.json").write_text(json.dumps(restored, indent=2) + "\n")
-        passed("persistence", "installed browser restored Standalone and live Zellij metadata")
+        if "dormant" not in json.dumps(restored).lower():
+            raise RuntimeError("persisted restart did not restore any lazy Dormant document")
+        native(root, env, "assert", "Dormant")
+        native(root, env, "snapshot", output=evidence / "atspi-dormant.json")
+        passed("persistence", "installed browser restored Standalone/live Zellij metadata and exposed lazy Dormant rows through AT-SPI")
     finally:
         (evidence / "scenarios.json").write_text(json.dumps(scenarios, indent=2) + "\n")
+        if driver is not None:
+            try: driver.quit()
+            except Exception: pass
+        if webdriver_process is not None and webdriver_process.poll() is None:
+            webdriver_process.terminate()
+            try: webdriver_process.wait(timeout=10)
+            except subprocess.TimeoutExpired: webdriver_process.kill()
+        if 'webdriver_log' in locals():
+            webdriver_log.close()
+        if ctl_disabled is not None and ctl_disabled.exists() and not ctl.exists():
+            ctl_disabled.rename(ctl)
         run(["zellij", "delete-session", session, "--force"], env, check=False)
         if zellij_client and zellij_client.poll() is None:
             zellij_client.terminate()
@@ -366,11 +785,18 @@ def main() -> int:
             try: process.wait(timeout=10)
             except subprocess.TimeoutExpired: process.kill()
         browser_log.close()
+        port_4399_env = env.copy(); port_4399_env["LAVISH_AXI_PORT"] = "4399"
+        run(["npx", "-y", "lavish-axi", "stop"], port_4399_env, check=False)
         if state_home.exists():
             shutil.copytree(state_home, evidence / "persistence-final", dirs_exist_ok=True)
         shutil.rmtree(isolated, ignore_errors=True)
 
-    required_names = {"standalone", "multi_project_single_instance", "dedupe", "plugin_focus", "accessibility", "native_download", "memory", "persistence"}
+    required_names = {
+        "standalone", "multi_project_single_instance", "dedupe",
+        "shared_session_feedback", "stale_url_reconnect", "native_close_reopen",
+        "plugin_focus", "plugin_degradation", "accessibility", "native_download",
+        "memory", "persistence",
+    }
     missing = required_names - scenarios.keys()
     if missing:
         raise RuntimeError(f"required installed scenarios did not pass: {sorted(missing)}")

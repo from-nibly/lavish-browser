@@ -1,72 +1,28 @@
 {
   "schema_version": 1,
-  "status": "pass",
-  "classification": "installed-live",
-  "automated_evidence": {
-    "root": "target/e2e/automated-final",
-    "manifest": "target/e2e/automated-final/manifest.json",
-    "capabilities": "target/e2e/automated-final/compatibility/capabilities.json",
-    "scenarios": "target/e2e/automated-final/integration/scenarios.json",
-    "installed_artifacts": "target/e2e/automated-final/integration/installed-artifacts.json",
-    "status": "pass_except_separately_completed_manual_excalidraw"
+  "kind": "installed_capability_contract",
+  "status": "evidence_required",
+  "generator": "tests/e2e/generate_installed_capabilities.py",
+  "required_scenarios": [
+    "standalone",
+    "multi_project_single_instance",
+    "dedupe",
+    "shared_session_feedback",
+    "stale_url_reconnect",
+    "native_close_reopen",
+    "plugin_focus",
+    "plugin_degradation",
+    "accessibility",
+    "native_download",
+    "memory",
+    "persistence"
+  ],
+  "required_live_surfaces": {
+    "native": "AT-SPI/Dogtail names, actions, placeholders and focus",
+    "web": "production WebKitWebDriver DOM and screenshots",
+    "upstream": "real lavish-axi session, foreground poll and HTTP lifecycle",
+    "zellij": "real isolated session, installed WASM and installed helper",
+    "manual_excalidraw": "exact-hash human observation plus real whiteboard poll"
   },
-  "manual_excalidraw_evidence": {
-    "root": "target/e2e/manual-direct-relaunch",
-    "observation": "target/e2e/manual-direct-relaunch/manual-observation.json",
-    "poll_output": "target/e2e/manual-direct-relaunch/poll-whiteboard.txt",
-    "installed_browser_hash": "target/e2e/manual-direct-relaunch/installed-browser-sha256.txt",
-    "classification": "manual-live",
-    "display": ":1",
-    "session_url": "http://127.0.0.1:4387/session/fe3fbe42f13c85ff",
-    "source_session_key_matches_canonical_path_sha256": true,
-    "shape_visible_before_reload": true,
-    "shape_persisted_after_upstream_reload_artifact": true,
-    "feedback_sent_to_agent": true,
-    "real_foreground_poll_exit_code": 0,
-    "poll_tag": "whiteboard",
-    "regular_chat_substitution": false,
-    "added_rectangle_id": "Znd9TKtsFXh3H4Sro1F8p",
-    "note": "testing",
-    "scene_and_preview_paths_present": true,
-    "status": "pass"
-  },
-  "binary_correlation": {
-    "sha256": "54c79374d03e0415a0623c8a4b75f9cfa7dd78f69252c355c230f6922fdd9c73",
-    "automated_prefix": "target/e2e/automated-final/prefix/bin/lavish-browser",
-    "manual_prefix": "target/e2e/manual-relaunch/prefix/bin/lavish-browser",
-    "hashes_match": true,
-    "manual_prefix_launcher_sha256_matches_automated_install": true,
-    "manual_prefix_control_helper_sha256_matches_automated_install": true,
-    "manual_prefix_plugin_sha256_matches_automated_install": true
-  },
-  "capabilities": {
-    "production_webdriver": "pass",
-    "layout_gate_iframe": "pass",
-    "sibling_assets": "pass",
-    "live_reload": "pass",
-    "element_annotation": "pass",
-    "text_range_annotation": "pass",
-    "message_poll": "pass",
-    "reply_presence": "pass",
-    "layout_warning_poll": "pass",
-    "mermaid": "pass",
-    "clipboard": "pass",
-    "download": "pass",
-    "external_popup": "pass",
-    "excalidraw_persistence_and_feedback": "pass",
-    "browser_only_close": "pass",
-    "standalone": "pass",
-    "multi_project_single_instance": "pass",
-    "dedupe": "pass",
-    "native_accessibility": "pass",
-    "plugin_silent_selection_unknown_noop_and_close": "pass",
-    "memory_suspension": "pass",
-    "persistence_restart": "pass"
-  },
-  "cleanup": {
-    "manual_installed_browser_terminated": true,
-    "upstream_lavish_fixture_server_terminated_separately": true,
-    "fixture_poll_process_remaining": false,
-    "browser_close_was_not_treated_as_lavish_end": true
-  }
+  "note": "This tracked file defines the gate and intentionally cannot claim PASS. scripts/e2e-installed.sh writes the evidence-derived verdict to the run evidence directory only after the generator validates every required scenario and manual integrity correlation."
 }
