@@ -7,8 +7,6 @@ members = [
   "crates/browser-cli",
   "crates/browser-app",
   "crates/zellij-plugin",
-  "prototypes/lavish-open",
-  "prototypes/lavish-webview",
 ]
 
 [workspace.package]
