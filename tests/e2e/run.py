@@ -67,6 +67,22 @@ def terminal_command(session: str, command: str, env: dict[str, str]) -> None:
     ], env)
 
 
+def terminal_launcher(
+    session: str, launcher: Path, artifact: Path, log: Path,
+    env: dict[str, str], *, port: int | None = None,
+) -> None:
+    assignment = f"LAVISH_AXI_PORT={port} " if port is not None else ""
+    command = (
+        f": >{shlex.quote(str(log))}; "
+        "for attempt in 1 2 3; do "
+        f"printf '%s\\n' \"--- launcher attempt $attempt ---\" >>{shlex.quote(str(log))}; "
+        f"{assignment}{shlex.quote(str(launcher))} {shlex.quote(str(artifact))} "
+        f">>{shlex.quote(str(log))} 2>&1 && exit 0; "
+        "sleep $attempt; done; exit 1"
+    )
+    terminal_command(session, command, env)
+
+
 def browser_request(runtime: Path, command: dict) -> dict:
     request = {
         "protocol_version": 1,
@@ -320,19 +336,17 @@ def main() -> int:
         time.sleep(1)
 
         log_a = evidence / "zellij-open-a.log"
-        command_a = f"{shlex.quote(str(launcher))} {shlex.quote(str(artifact_a))} >{shlex.quote(str(log_a))} 2>&1"
-        terminal_command(session, command_a, zellij_env)
+        terminal_launcher(session, launcher, artifact_a, log_a, zellij_env)
         wait_until("first Zellij project", lambda: project_snapshot(zellij_count=1), 180)
         run(["zellij", "--session", session, "action", "new-tab", "--name", "Second"], zellij_env)
         time.sleep(1)
         log_b = evidence / "zellij-open-b.log"
-        command_b = f"{shlex.quote(str(launcher))} {shlex.quote(str(artifact_b))} >{shlex.quote(str(log_b))} 2>&1"
-        terminal_command(session, command_b, zellij_env)
+        terminal_launcher(session, launcher, artifact_b, log_b, zellij_env)
         snapshot = wait_until("second Zellij project", lambda: project_snapshot(zellij_count=2), 180)
         passed("multi_project_single_instance", f"one PID {process.pid}; {len(snapshot['projects'])} lazy projects")
 
         before_count = sum(len(p["documents"]) for p in snapshot["projects"])
-        terminal_command(session, command_b, zellij_env)
+        terminal_launcher(session, launcher, artifact_b, log_b, zellij_env)
         time.sleep(3)
         after = state(ctl, env)
         assert sum(len(p["documents"]) for p in after["projects"]) == before_count
@@ -341,8 +355,7 @@ def main() -> int:
         # Materialize the same canonical source in both real Zellij projects. The
         # launcher still delegates to one unchanged upstream Lavish session.
         shared_log = evidence / "zellij-open-shared.log"
-        shared_command = f"{shlex.quote(str(launcher))} {shlex.quote(str(artifact_a))} >{shlex.quote(str(shared_log))} 2>&1"
-        terminal_command(session, shared_command, zellij_env)
+        terminal_launcher(session, launcher, artifact_a, shared_log, zellij_env)
 
         def shared_projects():
             snapshot = state(ctl, env)
@@ -473,11 +486,7 @@ def main() -> int:
         # launcher on a different real upstream port. The browser model updates
         # every matching project-scoped document and each materialized view.
         refreshed_log = evidence / "stale-refresh-launcher.log"
-        refresh_command = (
-            f"LAVISH_AXI_PORT={refresh_port} {shlex.quote(str(launcher))} {shlex.quote(str(artifact_a))} "
-            f">{shlex.quote(str(refreshed_log))} 2>&1"
-        )
-        terminal_command(session, refresh_command, zellij_env)
+        terminal_launcher(session, launcher, artifact_a, refreshed_log, zellij_env, port=refresh_port)
 
         def refreshed_snapshot():
             snapshot = state(ctl, env)
@@ -555,10 +564,7 @@ def main() -> int:
         with urllib.request.urlopen(recovered_url, timeout=10) as response:
             assert response.status == 200
         reopen_document_log = evidence / "native-reopen-document.log"
-        terminal_command(session, (
-            f"LAVISH_AXI_PORT={refresh_port} {shlex.quote(str(launcher))} {shlex.quote(str(artifact_a))} "
-            f">{shlex.quote(str(reopen_document_log))} 2>&1"
-        ), zellij_env)
+        terminal_launcher(session, launcher, artifact_a, reopen_document_log, zellij_env, port=refresh_port)
         wait_until("ordinary reopen after native document close", lambda: shared_projects())
         native(root, env, "assert", document_close_name)
 
@@ -569,10 +575,7 @@ def main() -> int:
         with urllib.request.urlopen(recovered_url, timeout=10) as response:
             assert response.status == 200
         reopen_project_log = evidence / "native-reopen-project.log"
-        terminal_command(session, (
-            f"LAVISH_AXI_PORT={refresh_port} {shlex.quote(str(launcher))} {shlex.quote(str(artifact_a))} "
-            f">{shlex.quote(str(reopen_project_log))} 2>&1"
-        ), zellij_env)
+        terminal_launcher(session, launcher, artifact_a, reopen_project_log, zellij_env, port=refresh_port)
         wait_until("ordinary reopen after native project close", lambda: shared_projects())
         native(root, env, "assert", project_close_name)
         native(root, env, "snapshot", output=evidence / "atspi-after-native-reopen.json")
@@ -738,12 +741,7 @@ def main() -> int:
         # deterministic inactive suspension candidate.
         for artifact in (artifact_b, artifact_a):
             materialize_log = evidence / f"memory-materialize-{artifact.name}.log"
-            terminal_command(session, (
-                "for attempt in 1 2 3; do "
-                f"LAVISH_AXI_PORT={refresh_port} {shlex.quote(str(launcher))} {shlex.quote(str(artifact))} "
-                f">>{shlex.quote(str(materialize_log))} 2>&1 && exit 0; "
-                "sleep $attempt; done; exit 1"
-            ), zellij_env)
+            terminal_launcher(session, launcher, artifact, materialize_log, zellij_env, port=refresh_port)
             wait_until(
                 f"materialized {artifact.name} before memory warning",
                 lambda artifact=artifact: next((
