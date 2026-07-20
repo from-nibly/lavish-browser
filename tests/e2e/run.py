@@ -266,8 +266,10 @@ def main() -> int:
         snapshot = wait_until("Standalone project", lambda: project_snapshot(standalone=True))
         passed("standalone", "installed launcher created visible Standalone browser state")
 
+        # Browser restart reconciliation must query the same isolated Zellij
+        # server/config as the client, not the ambient user's sessions.
+        env["ZELLIJ_CONFIG_DIR"] = str(config / "zellij")
         zellij_env = env.copy()
-        zellij_env["ZELLIJ_CONFIG_DIR"] = str(config / "zellij")
         (config / "zellij").mkdir(parents=True, exist_ok=True)
         (config / "zellij/config.kdl").write_text(
             'simplified_ui true\nshow_startup_tips false\nshow_release_notes false\npane_frames false\n'

@@ -72,11 +72,9 @@ def finish_feedback_poll(
         attempts.append(result)
         transient_500 = result["exit_code"] != 0 and "request failed: 500" in result["stdout"].lower()
         if not transient_500:
-            result["attempts"] = attempts
-            return result
+            return {**result, "attempts": attempts}
         if attempt == 3:
-            result["attempts"] = attempts
-            return result
+            return {**result, "attempts": attempts}
         time.sleep(attempt)
         process = poll(artifact, env)
         tracked.append(process)
