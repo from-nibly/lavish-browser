@@ -9,7 +9,7 @@ profile=${LAVISH_E2E_PROFILE:-release}
 display=${LAVISH_E2E_DISPLAY:-:98}
 mkdir -p "$evidence/logs"
 
-required=(cargo dbus-daemon Xvfb WebKitWebDriver npx zellij python script xprop sha256sum)
+required=(cargo dbus-daemon Xvfb WebKitWebDriver npx zellij python script xprop sha256sum bspwm bspc xmessage)
 for command in "${required[@]}"; do
   command -v "$command" >/dev/null || {
     echo "FAIL: required live E2E command is unavailable: $command" >&2
@@ -39,9 +39,17 @@ DBUS_SESSION_BUS_ADDRESS=$AT_SPI_BUS_ADDRESS "$registry" >"$evidence/logs/atspi-
 registry_pid=$!
 Xvfb "$display" -screen 0 1600x1000x24 -nolisten tcp >"$evidence/logs/xvfb.log" 2>&1 &
 xvfb_pid=$!
+wm_config=$evidence/bspwmrc
+printf '#!/bin/sh\nbspc config focus_follows_pointer false\n' >"$wm_config"
+chmod 0700 "$wm_config"
+(
+  for _ in {1..50}; do xdpyinfo -display "$display" >/dev/null 2>&1 && break; sleep .1; done
+  exec env DISPLAY="$display" bspwm -c "$wm_config"
+) >"$evidence/logs/bspwm.log" 2>&1 &
+wm_pid=$!
 cleanup() {
-  kill "$registry_pid" "$xvfb_pid" "${accessibility_bus[1]}" "${session_bus[1]}" 2>/dev/null || true
-  wait "$registry_pid" "$xvfb_pid" 2>/dev/null || true
+  kill "$registry_pid" "$wm_pid" "$xvfb_pid" "${accessibility_bus[1]}" "${session_bus[1]}" 2>/dev/null || true
+  wait "$registry_pid" "$wm_pid" "$xvfb_pid" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 sleep 2

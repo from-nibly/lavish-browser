@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import socket
@@ -57,7 +58,10 @@ def state(ctl: Path, env: dict[str, str]) -> dict:
 
 def active_window(env: dict[str, str]) -> str:
     result = run(["xprop", "-root", "_NET_ACTIVE_WINDOW"], env, check=False)
-    return result.stdout.strip()
+    match = re.search(r"0x[0-9a-fA-F]+", result.stdout)
+    if result.returncode or not match or int(match.group(0), 16) == 0:
+        raise RuntimeError(f"window manager did not expose a valid active window: {result.stdout}{result.stderr}")
+    return match.group(0).lower()
 
 
 def terminal_command(session: str, command: str, env: dict[str, str]) -> None:
@@ -127,6 +131,36 @@ def terminate_pid(pid: int, timeout: float = 10):
         time.sleep(.1)
     try: os.kill(pid, 9)
     except ProcessLookupError: pass
+
+
+def sample_webkit_processes() -> dict:
+    processes = []
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            command = (proc / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+            if "WebKit" not in command:
+                continue
+            status = (proc / "status").read_text()
+            rss_line = next((line for line in status.splitlines() if line.startswith("VmRSS:")), "VmRSS: 0 kB")
+            rss_kib = int(rss_line.split()[1])
+            pss_kib = 0
+            rollup = proc / "smaps_rollup"
+            if rollup.is_file():
+                pss_line = next((line for line in rollup.read_text().splitlines() if line.startswith("Pss:")), "Pss: 0 kB")
+                pss_kib = int(pss_line.split()[1])
+            processes.append({"pid": int(proc.name), "rss_kib": rss_kib, "pss_kib": pss_kib, "command": command[:1000]})
+        except (FileNotFoundError, PermissionError, ProcessLookupError, StopIteration, ValueError):
+            continue
+    processes.sort(key=lambda process: process["pid"])
+    return {
+        "timestamp": time.time(),
+        "processes": processes,
+        "pids": [process["pid"] for process in processes],
+        "rss_kib": sum(process["rss_kib"] for process in processes),
+        "pss_kib": sum(process["pss_kib"] for process in processes),
+    }
 
 
 def webdriver_session(browser: Path, port: int):
@@ -261,6 +295,7 @@ def main() -> int:
     webdriver_process = None
     driver = None
     ctl_disabled = None
+    reference_window = None
     scenarios: dict[str, dict[str, str]] = {}
 
     def passed(name: str, detail: str) -> None:
@@ -598,30 +633,51 @@ def main() -> int:
             "plugin helper selecting second project",
             lambda: f"select-project\t{session}\t{tab_ids[1]}" in helper_trace.read_text() if helper_trace.exists() else False,
         )
-        focus_before = active_window(env)
+        reference_window = subprocess.Popen(
+            ["xmessage", "-name", "lavish-e2e-focus-reference", "Lavish E2E focus reference"],
+            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        focus_before = wait_until("managed reference window focus", lambda: active_window(env), 20)
+        reference_properties = run(["xprop", "-id", focus_before, "WM_NAME", "WM_CLASS"], env)
+        (evidence / "focus-reference-window.txt").write_text(reference_properties.stdout)
         focus_state_before = run([sys.executable, str(root / "tests/e2e/focus_accessibility.py")], env).stdout.strip()
         presentation_before = state(ctl, env)["presentation_count"]
+        focus_samples = [{"event": "reference", "active_window": focus_before}]
+
         run(["zellij", "--session", session, "action", "go-to-tab", "1"], zellij_env)
         selected = wait_until(
             "plugin selecting first project",
             lambda: selected_snapshot({"kind": "zellij", "session_name": session, "stable_tab_id": tab_ids[0]}),
         )
-        focus_after = active_window(env)
-        focus_state_after = run([sys.executable, str(root / "tests/e2e/focus_accessibility.py")], env).stdout.strip()
+        focus_samples.append({"event": "select", "active_window": active_window(env)})
         first_select = f"select-project\t{session}\t{tab_ids[0]}"
         first_select_count = helper_trace.read_text().count(first_select)
         run(["zellij", "--session", session, "action", "go-to-tab", "1"], zellij_env)
         time.sleep(2)
         if helper_trace.read_text().count(first_select) != first_select_count:
             raise RuntimeError("unchanged active Zellij tab dispatched a duplicate helper")
+        focus_samples.append({"event": "unchanged", "active_window": active_window(env)})
+        run(["zellij", "--session", session, "action", "new-tab", "--name", "FocusUnknown"], zellij_env)
+        time.sleep(2)
+        if state(ctl, env)["selected_project"] != selected["selected_project"]:
+            raise RuntimeError("unknown focus-test tab changed browser selection")
+        focus_samples.append({"event": "unknown", "active_window": active_window(env)})
+        run(["zellij", "--session", session, "action", "close-pane"], zellij_env)
+        time.sleep(2)
+        focus_samples.append({"event": "close", "active_window": active_window(env)})
+
+        focus_after = active_window(env)
+        focus_state_after = run([sys.executable, str(root / "tests/e2e/focus_accessibility.py")], env).stdout.strip()
         presentation_after = state(ctl, env)["presentation_count"]
-        if focus_before != focus_after or focus_state_before != focus_state_after or presentation_before != presentation_after:
+        if any(sample["active_window"] != focus_before for sample in focus_samples) or presentation_before != presentation_after:
             raise RuntimeError(
-                f"plugin changed focus/presentation: X {focus_before!r}->{focus_after!r}, "
-                f"AT-SPI {focus_state_before!r}->{focus_state_after!r}, present {presentation_before}->{presentation_after}"
+                f"plugin changed managed focus/presentation: samples={focus_samples}, "
+                f"present {presentation_before}->{presentation_after}"
             )
         (evidence / "plugin-focus.json").write_text(json.dumps({
-            "x_active_before": focus_before, "x_active_after": focus_after,
+            "window_manager": "bspwm",
+            "reference_window": focus_before,
+            "samples": focus_samples,
             "atspi_before": json.loads(focus_state_before), "atspi_after": json.loads(focus_state_after),
             "presentation_before": presentation_before, "presentation_after": presentation_after,
         }, indent=2) + "\n")
@@ -688,8 +744,14 @@ def main() -> int:
         # post-close active can each emit once; unchanged duplicates must not.
         if stopped_growth > 6:
             raise RuntimeError(f"plugin/helper retry storm while browser absent: {stopped_growth} calls")
+        focus_while_absent = active_window(env)
+        if focus_while_absent != focus_before_stopped:
+            raise RuntimeError("browser-absent plugin lifecycle changed managed desktop focus")
         process = start_browser()
         restored_after_dependency = wait_until("browser restore after optional dependency test", lambda: state(ctl, env))
+        run(["bspc", "node", focus_before, "-f"], env)
+        wait_until("reference refocus after explicit browser restart", lambda: active_window(env) == focus_before)
+        focus_before_recovery = active_window(env)
         zellij_projects = [project for project in restored_after_dependency["projects"] if session in json.dumps(project["key"])]
         recovery_key = zellij_projects[0]["key"]
         ordered_ids = sorted(project["key"]["stable_tab_id"] for project in zellij_projects)
@@ -699,14 +761,16 @@ def main() -> int:
         run(["zellij", "--session", session, "action", "go-to-tab", recovery_tab_position], zellij_env)
         wait_until("plugin recovery after browser restore", lambda: selected_snapshot(recovery_key))
         focus_after_stopped = active_window(env)
-        if focus_after_stopped != focus_before_stopped:
-            raise RuntimeError("browser-absent plugin lifecycle changed desktop focus")
+        if focus_after_stopped != focus_before_recovery:
+            raise RuntimeError("recovered plugin lifecycle changed managed desktop focus")
         degradation["stopped_browser"] = {
             "helper_invocation_growth": stopped_growth,
             "browser_not_launched_by_helper": True,
             "events_exercised": ["active", "unchanged", "unknown", "close"],
-            "focus_before": focus_before_stopped,
-            "focus_after": focus_after_stopped,
+            "focus_before_absent_events": focus_before_stopped,
+            "focus_after_absent_events": focus_while_absent,
+            "focus_before_recovery_events": focus_before_recovery,
+            "focus_after_recovery_events": focus_after_stopped,
             "recovered_selected_project": recovery_key,
         }
         (evidence / "plugin-degradation.json").write_text(json.dumps(degradation, indent=2) + "\n")
@@ -736,10 +800,16 @@ def main() -> int:
             f"real plugin selected/ignored/closed one-way; X={focus_before}; AT-SPI={focus_state_before}; presentations={presentation_before}",
         )
 
-        # Ensure the surviving project has two materialized real WebViews after
-        # the dependency-recovery process restart: open B, then A so B is the
-        # deterministic inactive suspension candidate.
-        for artifact in (artifact_b, artifact_a):
+        # Materialize enough distinct real sessions that destroying inactive
+        # retained views is externally observable despite WebKit process pooling.
+        memory_artifacts = []
+        for index in range(6):
+            artifact = fixture / f"memory-{index}.html"
+            artifact.write_text(artifact_a.read_text().replace(
+                "Lavish WebKit Compatibility", f"Memory release fixture {index}", 1,
+            ))
+            memory_artifacts.append(artifact)
+        for artifact in [artifact_b, *memory_artifacts, artifact_a]:
             materialize_log = evidence / f"memory-materialize-{artifact.name}.log"
             terminal_launcher(session, launcher, artifact, materialize_log, zellij_env, port=refresh_port)
             wait_until(
@@ -752,33 +822,111 @@ def main() -> int:
                 180,
             )
 
-        processes_before = run(["ps", "-eo", "pid,ppid,rss,comm,args"], env, check=False)
-        (evidence / "processes-before-memory.txt").write_text(processes_before.stdout)
+        time.sleep(2)
+        pre_memory_state = state(ctl, env)
+        pre_sample = sample_webkit_processes()
+        (evidence / "memory-processes-pre.json").write_text(json.dumps(pre_sample, indent=2) + "\n")
+        browser_log_path = evidence / "browser.log"
+        release_log_offset = browser_log_path.stat().st_size
+        (evidence / "memory-view-release-pre.log").write_text(browser_log_path.read_text(errors="replace"))
         (evidence / "memory-warning").write_text("1 critical\n")
 
         def suspended_snapshot():
             snapshot = state(ctl, env)
-            return snapshot if "suspended" in json.dumps(snapshot).lower() else None
+            suspended_count = sum(
+                document["lifecycle"] == "suspended"
+                for project in snapshot["projects"] for document in project["documents"]
+            )
+            return snapshot if suspended_count >= len(memory_artifacts) else None
 
         suspended = wait_until("memory suspension", suspended_snapshot)
         (evidence / "state-after-memory.json").write_text(json.dumps(suspended, indent=2) + "\n")
         native(root, env, "assert", "Suspended")
         native(root, env, "snapshot", output=evidence / "atspi-suspended.json")
-        processes = run(["ps", "-eo", "pid,ppid,rss,comm,args"], env, check=False)
-        (evidence / "processes-after-memory.txt").write_text(processes.stdout)
-        def web_rss(sample: str) -> int:
-            return sum(int(parts[2]) for line in sample.splitlines() if "WebKit" in line and len(parts := line.split(None, 4)) >= 3 and parts[2].isdigit())
-        rss_before = web_rss(processes_before.stdout)
-        rss_after = web_rss(processes.stdout)
-        memory_metrics = {
-            "webkit_rss_kib_before": rss_before,
-            "webkit_rss_kib_after": rss_after,
-            "webkit_rss_kib_delta": rss_after - rss_before,
-            "rss_reduced_in_sample": rss_after < rss_before,
-            "interpretation": "point-in-time process/RSS sample; suspension is asserted separately and RSS reduction is not required or claimed",
+
+        post_samples = []
+        for _ in range(15):
+            post_samples.append(sample_webkit_processes())
+            time.sleep(1)
+        (evidence / "memory-processes-post-settle.json").write_text(json.dumps(post_samples, indent=2) + "\n")
+        release_log = browser_log_path.read_text(errors="replace")[release_log_offset:]
+        (evidence / "memory-view-release-post.log").write_text(release_log)
+        released_views = sum(int(value) for value in re.findall(r"released (\d+) retained document view", release_log))
+        final_post = post_samples[-1]
+        exited_pids = sorted(set(pre_sample["pids"]) - set(final_post["pids"]))
+        minimum_pss = min(sample["pss_kib"] for sample in post_samples)
+        pss_decrease = pre_sample["pss_kib"] - minimum_pss
+        meaningful_decrease = pss_decrease >= max(32768, int(pre_sample["pss_kib"] * 0.10))
+        if released_views < len(memory_artifacts) or not (exited_pids or meaningful_decrease):
+            raise RuntimeError(
+                f"retained views did not produce observable release: released={released_views}, "
+                f"exited={exited_pids}, pss_decrease={pss_decrease} KiB"
+            )
+
+        resume_artifact = memory_artifacts[0]
+        resume_name = f"Resume suspended document {resume_artifact.name}"
+        native(root, env, "click", resume_name)
+        resume_observations = []
+
+        def resumed_snapshot():
+            snapshot = state(ctl, env)
+            matches = [
+                document for project in snapshot["projects"] for document in project["documents"]
+                if document["source_file"] == str(resume_artifact.resolve())
+            ]
+            resume_observations.append([document["lifecycle"] for document in matches])
+            return snapshot if len(matches) == 1 and matches[0]["lifecycle"] in ("ready", "failed") else None
+
+        resumed = wait_until("AT-SPI suspended document resume", resumed_snapshot, 180)
+        (evidence / "state-after-memory-resume.json").write_text(json.dumps(resumed, indent=2) + "\n")
+        native(root, env, "absent", resume_name)
+        resumed_lifecycle = next(
+            document["lifecycle"] for project in resumed["projects"] for document in project["documents"]
+            if document["source_file"] == str(resume_artifact.resolve())
+        )
+        native(root, env, "assert", "Ready" if resumed_lifecycle == "ready" else "Reconnect document")
+        native(root, env, "snapshot", output=evidence / "atspi-after-memory-resume.json")
+        resume_samples = []
+        for _ in range(8):
+            resume_samples.append(sample_webkit_processes())
+            time.sleep(1)
+        (evidence / "memory-processes-post-resume.json").write_text(json.dumps(resume_samples, indent=2) + "\n")
+        new_resume_pids = sorted(set(resume_samples[-1]["pids"]) - set(final_post["pids"]))
+        resume_pss_growth = max(sample["pss_kib"] for sample in resume_samples) - final_post["pss_kib"]
+        fresh_view_observed = bool(new_resume_pids) or resume_pss_growth >= 8192
+        if not fresh_view_observed:
+            raise RuntimeError("native Resume did not produce observable fresh WebKit view allocation")
+
+        memory_evidence = {
+            "pre_materialized_ready_documents": sum(
+                document["lifecycle"] == "ready"
+                for project in pre_memory_state["projects"] for document in project["documents"]
+            ),
+            "suspended_documents": sum(
+                document["lifecycle"] == "suspended"
+                for project in suspended["projects"] for document in project["documents"]
+            ),
+            "released_retained_views": released_views,
+            "pre_webkit_pids": pre_sample["pids"],
+            "settled_webkit_pids": final_post["pids"],
+            "exited_webkit_pids": exited_pids,
+            "pre_pss_kib": pre_sample["pss_kib"],
+            "minimum_settled_pss_kib": minimum_pss,
+            "pss_decrease_kib": pss_decrease,
+            "meaningful_pss_decrease": meaningful_decrease,
+            "release_observed_by": "process_exit" if exited_pids else "meaningful_pss_decrease",
+            "resume_action": resume_name,
+            "resume_click_count": 1,
+            "resume_document_matches": 1,
+            "resume_lifecycle": resumed_lifecycle,
+            "resume_observed_lifecycles": resume_observations,
+            "resume_new_webkit_pids": new_resume_pids,
+            "resume_pss_growth_kib": resume_pss_growth,
+            "fresh_view_observed": fresh_view_observed,
+            "pooling_contract": "registry release is mandatory; process exit or >=max(32MiB,10%) PSS decrease proves release; resume requires a new PID or >=8MiB PSS growth",
         }
-        (evidence / "memory-metrics.json").write_text(json.dumps(memory_metrics, indent=2) + "\n")
-        passed("memory", f"critical warning exposed native Suspended state; retained process/RSS samples without claiming reduction: {memory_metrics}")
+        (evidence / "memory-evidence.json").write_text(json.dumps(memory_evidence, indent=2) + "\n")
+        passed("memory", f"released {released_views} retained real views with {memory_evidence['release_observed_by']}; native Resume created one observable fresh view and reached {resumed_lifecycle}")
 
         before_restart = state(ctl, env)
         (evidence / "state-before-restart.json").write_text(json.dumps(before_restart, indent=2) + "\n")
@@ -810,6 +958,10 @@ def main() -> int:
             webdriver_log.close()
         if ctl_disabled is not None and ctl_disabled.exists() and not ctl.exists():
             ctl_disabled.rename(ctl)
+        if reference_window is not None and reference_window.poll() is None:
+            reference_window.terminate()
+            try: reference_window.wait(timeout=5)
+            except subprocess.TimeoutExpired: reference_window.kill()
         run(["zellij", "delete-session", session, "--force"], env, check=False)
         if zellij_client and zellij_client.poll() is None:
             zellij_client.terminate()

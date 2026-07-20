@@ -42,6 +42,42 @@ def main():
     failed = {name for name in REQUIRED_SCENARIOS if scenarios.get(name, {}).get("status") != "pass"}
     if missing or failed:
         raise SystemExit(f"installed scenarios incomplete: missing={sorted(missing)}, failed={sorted(failed)}")
+
+    integration = args.automated_root / "integration"
+    memory = load(integration / "memory-evidence.json")
+    memory_valid = all([
+        memory.get("pre_materialized_ready_documents", 0) >= 7,
+        memory.get("suspended_documents", 0) >= 6,
+        memory.get("released_retained_views", 0) >= 6,
+        bool(memory.get("exited_webkit_pids")) or memory.get("meaningful_pss_decrease") is True,
+        memory.get("release_observed_by") in ("process_exit", "meaningful_pss_decrease"),
+        memory.get("resume_click_count") == 1,
+        memory.get("resume_document_matches") == 1,
+        memory.get("resume_lifecycle") in ("ready", "failed"),
+        memory.get("fresh_view_observed") is True,
+        (integration / "memory-view-release-post.log").stat().st_size > 0,
+        (integration / "memory-processes-pre.json").stat().st_size > 0,
+        (integration / "memory-processes-post-settle.json").stat().st_size > 0,
+        (integration / "memory-processes-post-resume.json").stat().st_size > 0,
+        (integration / "atspi-suspended.json").stat().st_size > 0,
+        (integration / "atspi-after-memory-resume.json").stat().st_size > 0,
+    ])
+    if not memory_valid:
+        raise SystemExit(f"installed memory release/resume evidence is invalid: {memory}")
+
+    focus = load(integration / "plugin-focus.json")
+    reference = focus.get("reference_window", "")
+    focus_valid = all([
+        focus.get("window_manager") == "bspwm",
+        isinstance(reference, str) and reference.startswith("0x") and int(reference, 16) != 0,
+        {sample.get("event") for sample in focus.get("samples", [])} >= {"reference", "select", "unchanged", "unknown", "close"},
+        all(sample.get("active_window") == reference for sample in focus.get("samples", [])),
+        focus.get("presentation_before") == focus.get("presentation_after"),
+        (integration / "focus-reference-window.txt").stat().st_size > 0,
+    ])
+    if not focus_valid:
+        raise SystemExit(f"installed managed-focus evidence is invalid: {focus}")
+
     automated_caps = compatibility["capabilities"]
     blockers = {name for name, result in automated_caps.items() if result["status"] != "pass"}
     if blockers - {"excalidraw"}:
