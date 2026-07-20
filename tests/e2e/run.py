@@ -656,7 +656,9 @@ def main() -> int:
             "\tselect-project\t" in line or "\tclose-project\t" in line
             for line in helper_trace.read_text().splitlines()
         ) - lifecycle_before_stopped
-        if stopped_growth > 4:
+        # Changed active (2), return active, unknown active, unknown close and
+        # post-close active can each emit once; unchanged duplicates must not.
+        if stopped_growth > 6:
             raise RuntimeError(f"plugin/helper retry storm while browser absent: {stopped_growth} calls")
         process = start_browser()
         restored_after_dependency = wait_until("browser restore after optional dependency test", lambda: state(ctl, env))
