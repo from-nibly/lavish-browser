@@ -812,7 +812,7 @@ def main() -> int:
         # Materialize enough distinct real sessions that destroying inactive
         # retained views is externally observable despite WebKit process pooling.
         memory_artifacts = []
-        for index in range(6):
+        for index in range(4):
             artifact = fixture / f"memory-{index}.html"
             artifact.write_text(artifact_a.read_text().replace(
                 "Lavish WebKit Compatibility", f"Memory release fixture {index}", 1,

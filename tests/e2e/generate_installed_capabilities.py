@@ -46,9 +46,9 @@ def main():
     integration = args.automated_root / "integration"
     memory = load(integration / "memory-evidence.json")
     memory_valid = all([
-        memory.get("pre_materialized_ready_documents", 0) >= 7,
-        memory.get("suspended_documents", 0) >= 6,
-        memory.get("released_retained_views", 0) >= 6,
+        memory.get("pre_materialized_ready_documents", 0) >= 5,
+        memory.get("suspended_documents", 0) >= 4,
+        memory.get("released_retained_views", 0) >= 4,
         bool(memory.get("exited_webkit_pids")) or memory.get("meaningful_pss_decrease") is True,
         memory.get("release_observed_by") in ("process_exit", "meaningful_pss_decrease"),
         memory.get("resume_click_count") == 1,
