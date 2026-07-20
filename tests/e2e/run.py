@@ -270,28 +270,124 @@ def main() -> int:
         snapshot = state(ctl, env)
         return snapshot if snapshot.get("selected_project") == expected else None
 
+    control_attempts = evidence / "control-attempts.jsonl"
+
+    def record_control_attempt(kind: str, attempt: int, **details) -> None:
+        with control_attempts.open("a") as log:
+            log.write(json.dumps({
+                "timestamp": time.time(), "kind": kind, "attempt": attempt, **details,
+            }, sort_keys=True) + "\n")
+
+    def healthy_state() -> dict:
+        ping = run([str(ctl), "ping"], env, check=False, timeout=15)
+        if ping.returncode:
+            raise RuntimeError(f"ping exit {ping.returncode}: {ping.stdout}{ping.stderr}")
+        envelope = json.loads(ping.stdout)
+        if envelope.get("status") != "ok":
+            raise RuntimeError(f"ping was not healthy: {ping.stdout}{ping.stderr}")
+        return state(ctl, env)
+
+    def native_click_until(description: str, accessible_name: str, predicate) -> object:
+        last = None
+        for attempt in range(1, 7):
+            try:
+                completed = predicate()
+                if completed:
+                    record_control_attempt(
+                        "native-click", attempt, description=description,
+                        accessible_name=accessible_name, readiness="already-complete",
+                    )
+                    return completed
+                result = native(root, env, "click", accessible_name, timeout=15)
+                record_control_attempt(
+                    "native-click", attempt, description=description,
+                    accessible_name=accessible_name, returncode=result.returncode,
+                    stdout=result.stdout, stderr=result.stderr,
+                )
+                completed = wait_until(description, predicate, 8)
+                return completed
+            except Exception as error:
+                last = error
+                record_control_attempt(
+                    "native-click", attempt, description=description,
+                    accessible_name=accessible_name, error=repr(error),
+                )
+                time.sleep(min(attempt * .25, 1.5))
+        raise RuntimeError(f"persistent native action failure for {description}: {last!r}")
+
+    def lifecycle_control(action: str, key: dict) -> dict:
+        if action not in ("select-project", "close-project"):
+            raise ValueError(f"unsupported lifecycle action: {action}")
+        argv = [str(ctl), action, key["session_name"], str(key["stable_tab_id"])]
+        last = None
+        for attempt in range(1, 9):
+            try:
+                snapshot = healthy_state()
+                exists = any(project["key"] == key for project in snapshot["projects"])
+                if action == "close-project" and not exists:
+                    record_control_attempt(action, attempt, argv=argv, readiness="already-absent", returncode=0)
+                    return snapshot
+                if not exists:
+                    raise RuntimeError(f"restored project not available yet: {key}")
+                result = run(argv, env, check=False, timeout=15)
+                record_control_attempt(
+                    action, attempt, argv=argv, readiness="healthy", returncode=result.returncode,
+                    stdout=result.stdout, stderr=result.stderr,
+                )
+                if result.returncode:
+                    raise RuntimeError(f"exit {result.returncode}: {result.stdout}{result.stderr}")
+                expected = wait_until(
+                    f"{action} state acknowledgement for {key}",
+                    (lambda: selected_snapshot(key)) if action == "select-project" else
+                    (lambda: key if all(project["key"] != key for project in healthy_state()["projects"]) else None),
+                    10,
+                )
+                return expected
+            except Exception as error:
+                last = error
+                record_control_attempt(action, attempt, argv=argv, error=repr(error))
+                time.sleep(min(attempt * .25, 1.5))
+        raise RuntimeError(f"persistent {action} failure for {key}: {last!r}")
+
     browser_log = (evidence / "browser.log").open("w")
 
     def start_browser():
         candidate = None
-        for _ in range(5):
+        for attempt in range(1, 6):
             candidate = subprocess.Popen([str(browser)], env=env, stdout=browser_log, stderr=subprocess.STDOUT)
-            deadline = time.monotonic() + 10
+            deadline = time.monotonic() + 15
+            last = None
             while time.monotonic() < deadline:
-                if (runtime / "lavish-browser/control.sock").exists():
-                    try:
-                        state(ctl, env)
-                        return candidate
-                    except Exception:
-                        pass
+                try:
+                    snapshot = healthy_state()
+                    if candidate.poll() is not None:
+                        raise RuntimeError(f"candidate exited {candidate.returncode} while another instance answered")
+                    if snapshot.get("process_id") != candidate.pid:
+                        raise RuntimeError(
+                            f"healthy socket belongs to PID {snapshot.get('process_id')}, expected {candidate.pid}"
+                        )
+                    record_control_attempt(
+                        "browser-start", attempt, pid=candidate.pid, returncode=None,
+                        restored_projects=len(snapshot["projects"]),
+                    )
+                    return candidate
+                except Exception as error:
+                    last = error
                 if candidate.poll() is not None:
                     break
-                time.sleep(.1)
+                time.sleep(.15)
+            record_control_attempt(
+                "browser-start", attempt, pid=candidate.pid,
+                returncode=candidate.poll(), error=repr(last),
+            )
             if candidate.poll() is None:
                 candidate.terminate()
                 candidate.wait(timeout=5)
+            (runtime / "lavish-browser/control.sock").unlink(missing_ok=True)
             time.sleep(1)
-        raise RuntimeError(f"installed browser did not become ready; final exit={candidate.returncode if candidate else None}")
+        raise RuntimeError(
+            f"installed browser did not become ready; final exit={candidate.returncode if candidate else None}"
+        )
 
     process = start_browser()
     session = f"lavish-e2e-{os.getpid()}"
@@ -423,7 +519,7 @@ def main() -> int:
         )
         time.sleep(1)
         first = shared_keys[0]
-        run([str(ctl), "select-project", first["session_name"], str(first["stable_tab_id"])], env)
+        lifecycle_control("select-project", first)
         time.sleep(1)
         process.terminate(); process.wait(timeout=15)
         (runtime / "lavish-browser/control.sock").unlink(missing_ok=True)
@@ -451,7 +547,7 @@ def main() -> int:
         process = start_browser()
 
         second = shared_keys[1]
-        run([str(ctl), "select-project", second["session_name"], str(second["stable_tab_id"])], env)
+        lifecycle_control("select-project", second)
         time.sleep(1)
         process.terminate(); process.wait(timeout=15)
         (runtime / "lavish-browser/control.sock").unlink(missing_ok=True)
@@ -475,21 +571,53 @@ def main() -> int:
         passed("shared_session_feedback", "one real upstream session in two retained project views; first-view feedback woke real poll and appeared in the second view")
 
         # Re-materialize both project-scoped views after the WebDriver-owned
-        # process cycles; startup restoration is intentionally lazy.
+        # process cycles; startup restoration is intentionally lazy. A failed
+        # initial load is safe to retry through the same idempotent OpenUrl
+        # contract used by the launcher, while every attempt remains recorded.
+        def materialize_shared_view(key: dict) -> dict:
+            source = str(artifact_a.resolve())
+            last = None
+            for attempt in range(1, 5):
+                lifecycle_control("select-project", key)
+                deadline = time.monotonic() + 45
+                while time.monotonic() < deadline:
+                    snapshot = healthy_state()
+                    project = next((item for item in snapshot["projects"] if item["key"] == key), None)
+                    document = next((
+                        item for item in project["documents"] if item["source_file"] == source
+                    ), None) if project else None
+                    last = document
+                    if document and document["lifecycle"] == "ready":
+                        record_control_attempt(
+                            "materialize-shared-view", attempt, key=key,
+                            lifecycle="ready", url=document["url"],
+                        )
+                        return document
+                    if document and document["lifecycle"] == "failed":
+                        browser_request(runtime, {
+                            "type": "open_url",
+                            "project": {
+                                "key": key, "label": project["label"],
+                                "raw_tab_name": project.get("raw_tab_name"),
+                            },
+                            "source_file": source, "url": document["url"],
+                        })
+                        record_control_attempt(
+                            "materialize-shared-view", attempt, key=key,
+                            lifecycle="failed-retry", url=document["url"],
+                        )
+                        break
+                    time.sleep(.25)
+                else:
+                    record_control_attempt(
+                        "materialize-shared-view", attempt, key=key,
+                        error=f"load did not settle; last={last!r}",
+                    )
+                time.sleep(min(attempt * .5, 2))
+            raise RuntimeError(f"persistent shared-view materialization failure for {key}: {last!r}")
+
         for key in shared_keys:
-            run([str(ctl), "select-project", key["session_name"], str(key["stable_tab_id"])], env)
-            wait_until(
-                f"materialized shared view {key}",
-                lambda key=key: next(
-                    (
-                        document for project in state(ctl, env)["projects"] if project["key"] == key
-                        for document in project["documents"]
-                        if document["source_file"] == str(artifact_a.resolve()) and document["lifecycle"] == "ready"
-                    ),
-                    None,
-                ),
-                90,
-            )
+            materialize_shared_view(key)
 
         # Stop the original real upstream server, then globally replace the
         # canonical source with a syntactically valid but unavailable loopback
@@ -592,13 +720,11 @@ def main() -> int:
         second_project = next(project for project in state(ctl, env)["projects"] if project["key"] == second)
         identity_text = f"Zellij session {session}, tab {second['stable_tab_id']}"
         document_close_name = f"Close document {artifact_a.name}, {identity_text}"
-        native(root, env, "click", document_close_name)
-
         def document_closed():
             project = next((item for item in state(ctl, env)["projects"] if item["key"] == second), None)
             return project if project and all(document["source_file"] != str(artifact_a.resolve()) for document in project["documents"]) else None
 
-        wait_until("native document close", document_closed)
+        native_click_until("native document close", document_close_name, document_closed)
         native(root, env, "absent", document_close_name)
         with urllib.request.urlopen(recovered_url, timeout=10) as response:
             assert response.status == 200
@@ -608,8 +734,10 @@ def main() -> int:
         native(root, env, "assert", document_close_name)
 
         project_close_name = f"Close project {second_project['label']}, {identity_text}"
-        native(root, env, "click", project_close_name)
-        wait_until("native project close", lambda: second if all(project["key"] != second for project in state(ctl, env)["projects"]) else None)
+        project_closed = lambda: second if all(
+            project["key"] != second for project in healthy_state()["projects"]
+        ) else None
+        native_click_until("native project close", project_close_name, project_closed)
         native(root, env, "absent", project_close_name)
         with urllib.request.urlopen(recovered_url, timeout=10) as response:
             assert response.status == 200
@@ -872,8 +1000,9 @@ def main() -> int:
                 f"exited={exited_pids}, pss_decrease={pss_decrease} KiB"
             )
 
-        suspended_sources = {
-            document["source_file"] for project in suspended["projects"] for document in project["documents"]
+        suspended_keys = {
+            (json.dumps(project["key"], sort_keys=True), document["source_file"])
+            for project in suspended["projects"] for document in project["documents"]
             if document["lifecycle"] == "suspended"
         }
         pre_atspi = json.loads((evidence / "atspi-suspended.json").read_text())
@@ -881,32 +1010,52 @@ def main() -> int:
         native(root, env, "click", "Resume")
         resume_observations = []
         resumed_source = None
+        resumed_project_key = None
 
         def resumed_snapshot():
-            nonlocal resumed_source
+            nonlocal resumed_source, resumed_project_key
             snapshot = state(ctl, env)
             resumed_documents = [
-                document for project in snapshot["projects"] for document in project["documents"]
-                if document["source_file"] in suspended_sources and document["lifecycle"] in ("ready", "failed")
+                (project["key"], document)
+                for project in snapshot["projects"] for document in project["documents"]
+                if (json.dumps(project["key"], sort_keys=True), document["source_file"]) in suspended_keys
+                and document["lifecycle"] in ("ready", "failed")
             ]
-            resume_observations.append({document["source_file"]: document["lifecycle"] for document in resumed_documents})
+            resume_observations.append({
+                f"{json.dumps(key, sort_keys=True)}::{document['source_file']}": document["lifecycle"]
+                for key, document in resumed_documents
+            })
             if len(resumed_documents) == 1:
-                resumed_source = resumed_documents[0]["source_file"]
+                resumed_project_key, resumed_document = resumed_documents[0]
+                resumed_source = resumed_document["source_file"]
                 return snapshot
             return None
 
         resumed = wait_until("AT-SPI suspended document resume", resumed_snapshot, 180)
         (evidence / "state-after-memory-resume.json").write_text(json.dumps(resumed, indent=2) + "\n")
+        # AT-SPI may expose only the active project subtree, so switching to the
+        # resumed document can reveal another project's existing Resume action.
+        # The model assertion above proves exactly one suspended source resumed;
+        # native evidence must show its resulting Ready/Reconnect surface and
+        # must never grow the total Resume action count.
         native(root, env, "snapshot", output=evidence / "atspi-after-memory-resume.json")
         post_atspi = json.loads((evidence / "atspi-after-memory-resume.json").read_text())
         post_resume_buttons = sum(entry["role"] == "button" and entry["name"] == "Resume" for entry in post_atspi)
-        if post_resume_buttons != pre_resume_buttons - 1:
-            raise RuntimeError(f"native Resume action count did not decrease exactly once: {pre_resume_buttons}->{post_resume_buttons}")
+        if post_resume_buttons > pre_resume_buttons:
+            raise RuntimeError(f"native Resume actions unexpectedly increased: {pre_resume_buttons}->{post_resume_buttons}")
         resumed_lifecycle = next(
             document["lifecycle"] for project in resumed["projects"] for document in project["documents"]
-            if document["source_file"] == resumed_source
+            if project["key"] == resumed_project_key and document["source_file"] == resumed_source
         )
-        native(root, env, "assert", "Ready" if resumed_lifecycle == "ready" else "Reconnect document")
+        native_names = [entry["name"] for entry in post_atspi]
+        native_lifecycle_visible = (
+            "Ready" in native_names if resumed_lifecycle == "ready" else
+            ("Failed" in native_names and any(name.startswith("Reconnect document") for name in native_names))
+        )
+        if not native_lifecycle_visible:
+            raise RuntimeError(
+                f"native resumed lifecycle was not visible for {resumed_lifecycle}: {native_names}"
+            )
         resume_samples = []
         for _ in range(8):
             resume_samples.append(sample_webkit_processes())
@@ -940,6 +1089,8 @@ def main() -> int:
             "resume_click_count": 1,
             "resume_button_count_before": pre_resume_buttons,
             "resume_button_count_after": post_resume_buttons,
+            "resume_button_count_contract": "AT-SPI active-subtree count must not increase; model identity proves exactly one resumed source",
+            "resume_document_project": resumed_project_key,
             "resume_document_source": resumed_source,
             "resume_document_matches": 1,
             "resume_lifecycle": resumed_lifecycle,

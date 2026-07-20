@@ -14,8 +14,11 @@ It is **not** a general-purpose browser or a replacement for `lavish-axi`. Upstr
 
 ## Build and install from a clean checkout
 
+Set `LAVISH_BROWSER_REPOSITORY` to this repository's actual clone URL or an existing local repository path; no public URL is assumed here.
+
 ```bash
-git clone <repository-url> lavish-browser
+LAVISH_BROWSER_REPOSITORY='/replace/with/clone-url-or-local-path'
+git clone "$LAVISH_BROWSER_REPOSITORY" lavish-browser
 cd lavish-browser
 nix-shell --run './scripts/check.sh'
 nix-shell --run './packaging/install.sh --prefix "$HOME/.local"'

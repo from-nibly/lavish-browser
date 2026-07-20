@@ -1,13 +1,10 @@
-# Lavish WebKitGTK production compatibility gate
+# Lavish WebKitGTK compatibility gate
 
-This gate tests the production `lavish-browser` WebView against an unchanged
-session served by upstream `lavish-axi`. It does not post to private Lavish APIs,
-serve artifacts, inject JavaScript into the application, or substitute a test
-renderer.
+The compatibility gate drives the production `lavish-browser` WebView against an unchanged session served by upstream `lavish-axi`. It does not post to private Lavish APIs, serve artifacts, inject application JavaScript, or substitute a test renderer.
 
-## Baseline recorded 2026-07-15
+## Validated baseline
 
-| Component | Version |
+| Component | Baseline |
 |---|---|
 | Rust | 1.95.0 |
 | GTK | 4.22.4 |
@@ -15,101 +12,74 @@ renderer.
 | Rust `gtk4` / `webkit6` | 0.11.4 / 0.6.1 |
 | upstream `lavish-axi` | 0.1.42 |
 | Selenium | 4.40.0 |
-| WebKitWebDriver | WebKitGTK 2.52.4 |
 
-The checked-in fixture is `tests/fixtures/lavish-compat/`. It contains only
-representative, secret-free HTML, local CSS/JS/SVG/WOFF2/download assets, and
-controls for browser policy checks. The JetBrains Mono WOFF2 fixture is from the
-open-source JetBrains Mono 2.304 package supplied by the development shell.
+The secret-free fixture is `tests/fixtures/lavish-compat/`. It contains representative HTML, local CSS/JS/SVG/WOFF2/download assets, Mermaid, and controls for browser policy checks.
 
-## Automated live harness
+## Release command and evidence contract
 
-Build the production binaries, then run the display/D-Bus/AT-SPI wrapper:
+The release proof is the installed-system harness, run with no special environment:
+
+```bash
+nix-shell --run './scripts/e2e-installed.sh'
+```
+
+It builds and installs locked production artifacts into an isolated prefix, provisions private XDG paths plus display/D-Bus/AT-SPI services, and runs:
+
+- real upstream Lavish open, poll, reply, layout warning, live reload, and browser-only close paths;
+- the production WebKit view through WebKitWebDriver;
+- native GTK controls through AT-SPI/Dogtail;
+- download and external-handler checks;
+- persistence and memory suspension/resume; and
+- an isolated real Zellij session with the installed WASM and helper.
+
+Each run writes an ignored bundle under `target/e2e/<run-id>/`. Durable outputs include:
+
+- `manifest.json` and `integration/installed-artifacts.json` for versions, paths, sizes, and hashes;
+- `compatibility/capabilities.json` for the automated/live browser matrix;
+- `integration/scenarios.json` for installed scenarios;
+- complete browser, WebDriver, upstream, poll, native, plugin, focus, persistence, and memory logs/evidence; and
+- `installed-capabilities.json`, generated only when every required scenario and compatibility capability validates.
+
+The tracked `tests/e2e/installed-capabilities.json` is only the required capability contract. It intentionally cannot claim that a future run passed. A release claim must point to a complete generated bundle whose top-level `installed-capabilities.json` has `status: "pass"` and classification `installed-live`.
+
+For focused compatibility development, use:
 
 ```bash
 nix-shell --run '
-  cargo build -p lavish-browser -p lavish-browser-cli &&
+  cargo build --locked -p lavish-browser -p lavish-browser-cli &&
   tests/fixtures/lavish-compat/run-live.sh target/compatibility/production
 '
 ```
 
-The harness copies the fixture before live-reload/layout-warning edits, uses
-short private XDG paths, invokes real `lavish-axi --no-open`, routes through the
-production launcher, launches the production binary through
-WebKitWebDriver, and owns real `lavish-axi poll`/`poll --agent-reply` child
-processes. Evidence includes versions, upstream and launcher output, browser and
-driver logs, poll results, a screenshot, persisted browser metadata, and
-`capabilities.json`.
+That focused harness intentionally exits nonzero while a required human residual is unavailable. Unit tests, direct HTTP/API calls, or screenshots alone do not convert it to PASS.
 
-Automation is opt-in with `LAVISH_BROWSER_AUTOMATION=1`. WebDriver's requested
-browsing context is a `WebView` created by the same production
-`DocumentView` constructor, signals, settings, navigation policy, and retained
-registry as normal documents. The required WebKit
-`is-controlled-by-automation` construct property is set; without it,
-WebKitWebDriver returns `session not created: failed to create a new browsing
-context`. Automation remains disabled by default.
+## Human Excalidraw evidence
 
-The harness exits nonzero while any required manual residual has status
-`not_run`; this is deliberate. Unit/API-only evidence must not turn that result
-into a pass.
+WebKitWebDriver cannot reliably produce a faithful Excalidraw canvas gesture. The Excalidraw capability therefore requires retained `manual-live` evidence containing:
 
-## Live run result in this implementation leg
+- a human-created edit visible before reload and persisted after reload/reopen;
+- feedback sent through the real browser surface;
+- a successful owned `lavish-axi poll` result with `tag: whiteboard`; and
+- the added element identity correlated between observation and poll.
 
-The retained evidence bundle is
-`target/compatibility/evidence/final-live-3/`. The original “W3C hang” was two
-separate test/controller defects, not a WebKit command deadlock:
+The capability generator verifies the recorded installed `lavish-browser` SHA-256 against the freshly installed browser in the same release bundle before accepting retained manual evidence. When evidence is reused across a docs/packaging-only candidate, release validation must additionally compare the installed launcher, control helper, and WASM hashes and reject the residual if any required executable differs. The retained evidence remains ignored run input; documentation does not depend on a particular historical worktree path.
 
-1. the controlled production view was being navigated before WebDriver owned
-   its new browsing context; and
-2. the inherited 911-pixel display caused the real Lavish layout gate to remain
-   active. On an isolated 1600×1000 Xvfb display, bounded W3C commands returned
-   in milliseconds. `w3c-trace.json` records blank-context lookup, navigation,
-   one selected handle, real URL/title, `document.readyState=complete`, and the
-   first `#layoutGateOverlay` lookup.
+## Required capability matrix
 
-The run proves real annotation, message/reply, live reload, layout warning,
-Mermaid, clipboard, download chooser/write, external handler, text range, and
-browser-only close paths. Download testing found and fixed three production
-policy defects: same-origin blob export was rejected, `FileDialog` had no
-non-portal chooser fallback, and WebKitGTK 6 expects an absolute destination
-path rather than a `file:` URI.
+| Capability | Required evidence |
+|---|---|
+| Production WebDriver and real DOM | W3C production context, URL/title/readiness and DOM assertions |
+| Session chrome/layout gate/artifact iframe | Visible gate transition and real iframe |
+| Relative CSS/JS/image/font | Real iframe asset assertions |
+| Live reload | Source edit observed in retained iframe |
+| Element and text-range annotations | Browser interaction wakes real poll |
+| Message and agent reply/presence | Real `lavish-axi poll`/`poll --agent-reply` |
+| Layout warning | Intentional overflow returned through poll |
+| Mermaid | Rendered fixture SVG/whiteboard |
+| Clipboard | Native clipboard read after live click |
+| Export/download | Native chooser writes and verifies export |
+| External link/popup | Isolated desktop handler receives exact URL |
+| Excalidraw persistence/feedback | Exact-hash correlated human edit and real whiteboard poll |
+| Browser-only close | Browser teardown without upstream `end` |
 
-The complete release gate now **passes**. The final human residual is retained
-at `target/compatibility/evidence/manual-residual-6/`: the user added one
-rectangle, and the owned unchanged `lavish-axi poll` returned a `whiteboard`
-payload identifying added element `279VBcgiM_4nEYTYcWCG-` and the real scene and
-preview paths. The edited scene remained visible after a full production browser
-close/reopen and another top-left Reload. This is classified `manual-live`; no
-Lavish API, private internals, or synthetic feedback was used as a substitute.
-
-That residual also exposed a production controller defect: a load lifecycle
-render tried to attach a retained document widget while it was still parented
-to the previous `GtkStack`, producing duplicate-child/parent assertions and a
-blank surface despite a `Ready` model and unchanged URL/title. Rendering now
-detaches retained document widgets before rebuilding their project stacks and
-rejects nested render entry. A fixed-binary live reload retained the visible
-whiteboard with no GTK criticals.
-
-## Capability matrix
-
-| Capability | Result | Evidence |
-|---|---|---|
-| Production WebDriver and real DOM | PASS | Custom production capabilities plus timed URL/title/ready-state/element trace |
-| Session chrome/layout gate/artifact iframe | PASS | Gate cleared on isolated 1600×1000 display |
-| Relative CSS/JS/image/font | PASS | Real iframe assertions |
-| Live reload | PASS | Copied source edit observed in retained iframe |
-| Element annotation | PASS | Production SDK card sent and real poll woke |
-| Text-range annotation | PASS | Live pointer range card sent and real poll woke |
-| Message waking real poll | PASS | Owned poll output retained |
-| Agent reply/presence | PASS | Real `poll --agent-reply` rendered and was woken |
-| Layout warning poll | PASS | Intentional 200vw edit returned a real warning poll |
-| Mermaid rendering | PASS | Vendored fixture Mermaid rendered SVG and inline whiteboard |
-| Clipboard | PASS | Live click plus exact native X11 clipboard read |
-| Export/download | PASS | Live AT-SPI chooser wrote and verified 3,691,256-byte export |
-| External link/popup | PASS | Isolated desktop HTTPS handler received exact URL |
-| Excalidraw persistence/feedback | PASS | Human-added rectangle returned by owned real whiteboard poll and persisted across full browser reopen/reload |
-| Browser-only close | PASS | Teardown did not call upstream end |
-
-The Excalidraw result is specifically `manual-live`; automated canvas gestures,
-unit tests, screenshots alone, direct HTTP, and private APIs do not qualify as
-substitutes for this evidence.
+Automation is enabled only when `LAVISH_BROWSER_AUTOMATION=1`; normal application runs do not expose a WebDriver context.
