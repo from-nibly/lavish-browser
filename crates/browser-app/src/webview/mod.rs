@@ -170,15 +170,13 @@ impl DocumentView {
         window: &gtk::ApplicationWindow,
         emit: Rc<dyn Fn(DocumentEvent)>,
     ) -> Rc<Self> {
-        Self::new_with_webview(
-            webkit6::WebView::new(),
-            url,
-            identity,
-            display_name,
-            window,
-            emit,
-            true,
-        )
+        // Each Lavish session keeps an EventSource open. Isolating connection pools
+        // prevents retained views from exhausting WebKit's per-host HTTP/1.1 limit.
+        let network_session = webkit6::NetworkSession::new_ephemeral();
+        let webview = webkit6::WebView::builder()
+            .network_session(&network_session)
+            .build();
+        Self::new_with_webview(webview, url, identity, display_name, window, emit, true)
     }
 
     pub fn new_for_automation(
