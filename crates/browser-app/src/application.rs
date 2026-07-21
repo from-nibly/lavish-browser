@@ -17,7 +17,7 @@ use lavish_browser_protocol::{
     ProjectSnapshot, RequestEnvelope, ResponseEnvelope, ResponseStatus,
 };
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::mpsc;
@@ -82,6 +82,7 @@ struct AppController {
     rendering: Cell<bool>,
     presentation_count: Cell<u64>,
     document_views: RefCell<webview::RetainedRegistry<DocumentKey, Rc<webview::DocumentView>>>,
+    project_stacks: RefCell<HashMap<ProjectKey, gtk::Stack>>,
     memory_monitor: gio::MemoryMonitor,
 }
 
@@ -137,6 +138,7 @@ impl AppController {
             rendering: Cell::new(false),
             presentation_count: Cell::new(0),
             document_views: RefCell::new(webview::RetainedRegistry::default()),
+            project_stacks: RefCell::new(HashMap::new()),
             memory_monitor: gio::MemoryMonitor::dup_default(),
         });
         controller.connect_notebook_selection();
@@ -259,7 +261,7 @@ impl AppController {
                 .get(index as usize)
                 .map(|project| project.key.clone());
             if let Some(key) = key {
-                controller.mutate(|model| model.select_project(&key, timestamp()));
+                controller.mutate_selection(|model| model.select_project(&key, timestamp()));
             }
         });
     }
@@ -369,7 +371,8 @@ impl AppController {
                     session_name,
                     stable_tab_id,
                 };
-                let selected = self.mutate(|model| model.select_project(&key, timestamp()));
+                let selected =
+                    self.mutate_selection(|model| model.select_project(&key, timestamp()));
                 response(
                     request_id,
                     if selected {
@@ -420,6 +423,18 @@ impl AppController {
     }
 
     fn mutate(self: &Rc<Self>, action: impl FnOnce(&mut BrowserModel) -> bool) -> bool {
+        self.mutate_with_render(action, true)
+    }
+
+    fn mutate_selection(self: &Rc<Self>, action: impl FnOnce(&mut BrowserModel) -> bool) -> bool {
+        self.mutate_with_render(action, false)
+    }
+
+    fn mutate_with_render(
+        self: &Rc<Self>,
+        action: impl FnOnce(&mut BrowserModel) -> bool,
+        structural: bool,
+    ) -> bool {
         let changed = {
             let mut model = self.model.borrow_mut();
             action(&mut model)
@@ -428,9 +443,52 @@ impl AppController {
             if let Err(error) = self.store.save(&self.model.borrow()) {
                 eprintln!("could not persist browser metadata: {error}");
             }
-            self.render();
+            let selection_requires_render = {
+                let model = self.model.borrow();
+                let views = self.document_views.borrow();
+                selection_requires_render(&model, |key| views.contains_key(key))
+            };
+            if structural || selection_requires_render {
+                self.render();
+            } else {
+                self.sync_selection_widgets();
+            }
         }
         changed
+    }
+
+    fn sync_selection_widgets(&self) {
+        if self.rendering.replace(true) {
+            return;
+        }
+        let selection = {
+            let model = self.model.borrow();
+            model.selected_project.as_ref().and_then(|selected| {
+                model
+                    .projects
+                    .iter()
+                    .position(|project| &project.key == selected)
+                    .map(|index| {
+                        let project = &model.projects[index];
+                        let document_index =
+                            project.selected_document.as_ref().and_then(|source| {
+                                project.documents.iter().position(|document| {
+                                    &document.key.canonical_source_file == source
+                                })
+                            });
+                        (selected.clone(), index, document_index)
+                    })
+            })
+        };
+        if let Some((project, project_index, document_index)) = selection {
+            self.notebook.set_current_page(Some(project_index as u32));
+            if let Some(document_index) = document_index
+                && let Some(stack) = self.project_stacks.borrow().get(&project)
+            {
+                stack.set_visible_child_name(&format!("document-{document_index}"));
+            }
+        }
+        self.rendering.set(false);
     }
 
     fn render(self: &Rc<Self>) {
@@ -453,6 +511,7 @@ impl AppController {
         while self.notebook.n_pages() > 0 {
             self.notebook.remove_page(Some(0));
         }
+        self.project_stacks.borrow_mut().clear();
 
         let model = self.model.borrow().clone();
         let live_keys: HashSet<_> = model
@@ -580,7 +639,7 @@ impl AppController {
                     project: project_key.clone(),
                     canonical_source_file: source,
                 };
-                controller.mutate(|model| model.select_document(&key, timestamp()));
+                controller.mutate_selection(|model| model.select_document(&key, timestamp()));
             }
         });
 
@@ -650,6 +709,9 @@ impl AppController {
             surface.append(&suspended);
         }
         surface.append(&stack);
+        self.project_stacks
+            .borrow_mut()
+            .insert(project.key.clone(), stack.clone());
 
         let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
         paned.set_widget_name(&format!("project-page-{identity}"));
@@ -948,6 +1010,25 @@ fn document_placeholder(
     container.upcast()
 }
 
+fn selection_requires_render(
+    model: &BrowserModel,
+    mut is_materialized: impl FnMut(&DocumentKey) -> bool,
+) -> bool {
+    let selected = model.selected_project.as_ref().and_then(|project_key| {
+        let project = model
+            .projects
+            .iter()
+            .find(|project| &project.key == project_key)?;
+        let source = project.selected_document.as_ref()?;
+        project
+            .documents
+            .iter()
+            .find(|document| &document.key.canonical_source_file == source)
+            .map(|document| &document.key)
+    });
+    selected.is_some_and(|key| !is_materialized(key))
+}
+
 fn response(
     request_id: String,
     status: ResponseStatus,
@@ -1064,7 +1145,10 @@ fn timestamp() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{document_identity, document_row_labels, project_identity, snapshot};
+    use super::{
+        document_identity, document_row_labels, project_identity, selection_requires_render,
+        snapshot,
+    };
     use lavish_browser_core::{BrowserModel, DocumentKey, DocumentLifecycle};
     use lavish_browser_protocol::{ProjectKey, ProjectMetadata};
 
@@ -1151,6 +1235,46 @@ mod tests {
         assert_eq!(detail, "Ready");
         assert!(!name.contains("/very/long"));
         assert!(!detail.contains("/very/long"));
+    }
+
+    #[test]
+    fn retained_selected_view_skips_structural_render() {
+        let mut model = BrowserModel::default();
+        let project = ProjectMetadata {
+            key: ProjectKey::Standalone {
+                label: "Standalone".into(),
+            },
+            label: "Standalone".into(),
+            raw_tab_name: None,
+        };
+        model.open_url(
+            project.clone(),
+            "/tmp/first.html",
+            "http://127.0.0.1:4387/session/first",
+            1,
+        );
+        model.open_url(
+            project,
+            "/tmp/second.html",
+            "http://127.0.0.1:4387/session/second",
+            2,
+        );
+        let first = model.projects[0].documents[0].key.clone();
+        let second = model.projects[0].documents[1].key.clone();
+
+        assert!(!selection_requires_render(&model, |key| key == &second));
+        assert!(selection_requires_render(&model, |key| key == &first));
+
+        assert!(model.select_document(&first, 3));
+        assert!(selection_requires_render(&model, |key| key == &second));
+        assert!(!selection_requires_render(&model, |key| key == &first));
+    }
+
+    #[test]
+    fn empty_selection_can_sync_without_structural_render() {
+        assert!(!selection_requires_render(&BrowserModel::default(), |_| {
+            false
+        }));
     }
 
     #[test]
