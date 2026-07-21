@@ -12,7 +12,7 @@ use std::io::{self, Write};
 use std::process::{Command as ProcessCommand, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const LAVISH_OPEN_BINARY: &str = "lavish-open";
 pub const CONTROL_BINARY: &str = "lavish-browser-ctl";
@@ -271,16 +271,16 @@ fn ensure_browser(client: &SocketClient) -> Result<ResponseEnvelope, String> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|error| format!("failed to start {:?}: {error}", executable))?;
-    let delays = [20, 40, 80, 160, 300, 500, 750, 1000];
-    for delay in delays {
-        thread::sleep(Duration::from_millis(delay));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(100));
         match client.request(&request(Command::Ping)) {
             Ok(response) => return Ok(response),
             Err(ControlError::Absent(_)) => continue,
             Err(error) => return Err(format!("browser readiness check failed: {error}")),
         }
     }
-    Err("timed out waiting for lavish-browser control socket".to_owned())
+    Err("timed out waiting 30 seconds for lavish-browser control socket".to_owned())
 }
 
 pub fn request(command: Command) -> RequestEnvelope {
