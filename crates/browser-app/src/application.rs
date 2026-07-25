@@ -327,6 +327,16 @@ impl AppController {
                 url,
             } => {
                 self.reconcile_live_zellij_projects();
+                let structural_open = {
+                    let model = self.model.borrow();
+                    !model.projects.iter().any(|existing_project| {
+                        existing_project.key == project.key
+                            && existing_project
+                                .documents
+                                .iter()
+                                .any(|document| document.key.canonical_source_file == source_file)
+                    })
+                };
                 let view_actions: Vec<_> = self
                     .model
                     .borrow()
@@ -346,10 +356,13 @@ impl AppController {
                     })
                     .collect();
                 let submitted_url = url.clone();
-                self.mutate(|model| {
-                    model.open_url(project, source_file, url, timestamp());
-                    true
-                });
+                self.mutate_with_render(
+                    |model| {
+                        model.open_url(project, source_file, url, timestamp());
+                        true
+                    },
+                    structural_open,
+                );
                 for (key, action) in view_actions {
                     let views = self.document_views.borrow();
                     let Some(view) = views.get(&key) else {
