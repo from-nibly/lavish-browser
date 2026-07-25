@@ -1,3 +1,4 @@
+use crate::labels::{project_label, super_tabs_id};
 use crate::{BrowserModel, DocumentLifecycle, ProjectKey};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -7,7 +8,7 @@ use std::process::Command;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LiveZellijState {
-    tabs_by_session: HashMap<String, HashSet<u32>>,
+    tabs_by_session: HashMap<String, HashMap<u32, String>>,
     unresolved_sessions: HashSet<String>,
 }
 
@@ -17,14 +18,46 @@ impl LiveZellijState {
         session_name: impl Into<String>,
         stable_tab_ids: impl IntoIterator<Item = u32>,
     ) {
+        self.tabs_by_session.insert(
+            session_name.into(),
+            stable_tab_ids
+                .into_iter()
+                .map(|stable_tab_id| (stable_tab_id, String::new()))
+                .collect(),
+        );
+    }
+
+    pub fn insert_tabs(
+        &mut self,
+        session_name: impl Into<String>,
+        tabs: impl IntoIterator<Item = (u32, String)>,
+    ) {
         self.tabs_by_session
-            .insert(session_name.into(), stable_tab_ids.into_iter().collect());
+            .insert(session_name.into(), tabs.into_iter().collect());
     }
 
     pub fn contains(&self, session_name: &str, stable_tab_id: u32) -> bool {
         self.tabs_by_session
             .get(session_name)
-            .is_some_and(|tabs| tabs.contains(&stable_tab_id))
+            .is_some_and(|tabs| tabs.contains_key(&stable_tab_id))
+    }
+
+    fn restored_tab(&self, session_name: &str, raw_tab_name: Option<&str>) -> Option<(u32, &str)> {
+        let durable_id = raw_tab_name.and_then(super_tabs_id)?;
+        self.tabs_by_session
+            .get(session_name)?
+            .iter()
+            .find_map(|(stable_tab_id, live_name)| {
+                (super_tabs_id(live_name).as_deref() == Some(durable_id.as_str()))
+                    .then_some((*stable_tab_id, live_name.as_str()))
+            })
+    }
+
+    fn tab_name(&self, session_name: &str, stable_tab_id: u32) -> Option<&str> {
+        self.tabs_by_session
+            .get(session_name)?
+            .get(&stable_tab_id)
+            .map(String::as_str)
     }
 
     pub fn mark_unresolved(&mut self, session_name: impl Into<String>) {
@@ -242,7 +275,10 @@ impl<R: CommandRunner> ZellijStateSource for ZellijCommandState<R> {
                     message: error.to_string(),
                 }
             })?;
-            state.insert_session(session_name.clone(), tabs.into_iter().map(|tab| tab.tab_id));
+            state.insert_tabs(
+                session_name.clone(),
+                tabs.into_iter().map(|tab| (tab.tab_id, tab.name)),
+            );
         }
         Ok(state)
     }
@@ -251,37 +287,112 @@ impl<R: CommandRunner> ZellijStateSource for ZellijCommandState<R> {
 #[derive(Debug, Deserialize)]
 struct TabRecord {
     tab_id: u32,
+    #[serde(default)]
+    name: String,
 }
 
 pub fn reconcile_model(model: &mut BrowserModel, live: &LiveZellijState) {
-    model.projects.retain(|project| match &project.key {
-        ProjectKey::Standalone { .. } => true,
-        ProjectKey::Zellij {
-            session_name,
-            stable_tab_id,
-        } => live.is_unresolved(session_name) || live.contains(session_name, *stable_tab_id),
-    });
+    reconcile_model_inner(model, live, true);
+}
 
-    for project in &mut model.projects {
-        for document in &mut project.documents {
-            document.lifecycle = DocumentLifecycle::Dormant;
-            document.load_error = None;
+pub fn reconcile_model_preserving_runtime(model: &mut BrowserModel, live: &LiveZellijState) {
+    reconcile_model_inner(model, live, false);
+}
+
+fn reconcile_model_inner(
+    model: &mut BrowserModel,
+    live: &LiveZellijState,
+    reset_runtime_state: bool,
+) {
+    let selected_before = model.selected_project.clone();
+    let mut remapped_keys = HashMap::new();
+    let mut claimed_keys = HashSet::new();
+    let mut reconciled_projects = Vec::with_capacity(model.projects.len());
+
+    for mut project in std::mem::take(&mut model.projects) {
+        let old_key = project.key.clone();
+        let target = match &old_key {
+            ProjectKey::Standalone { .. } => Some((old_key.clone(), None)),
+            ProjectKey::Zellij { session_name, .. } if live.is_unresolved(session_name) => {
+                Some((old_key.clone(), None))
+            }
+            ProjectKey::Zellij {
+                session_name,
+                stable_tab_id,
+            } => {
+                if let Some((restored_tab_id, live_name)) =
+                    live.restored_tab(session_name, project.raw_tab_name.as_deref())
+                {
+                    Some((
+                        ProjectKey::Zellij {
+                            session_name: session_name.clone(),
+                            stable_tab_id: restored_tab_id,
+                        },
+                        Some(live_name.to_owned()),
+                    ))
+                } else if live.contains(session_name, *stable_tab_id) {
+                    let live_name = live
+                        .tab_name(session_name, *stable_tab_id)
+                        .unwrap_or_default();
+                    let persisted_id = project.raw_tab_name.as_deref().and_then(super_tabs_id);
+                    let live_id = super_tabs_id(live_name);
+                    (persisted_id.is_none() || persisted_id == live_id)
+                        .then(|| (old_key.clone(), Some(live_name.to_owned())))
+                } else {
+                    None
+                }
+            }
+        };
+        let Some((target_key, live_name)) = target else {
+            continue;
+        };
+        if !claimed_keys.insert(target_key.clone()) {
+            continue;
         }
+
+        if let Some(live_name) = live_name.filter(|name| !name.is_empty()) {
+            let stable_tab_id = match &target_key {
+                ProjectKey::Zellij { stable_tab_id, .. } => *stable_tab_id,
+                ProjectKey::Standalone { .. } => unreachable!(),
+            };
+            project.label = project_label(&live_name, stable_tab_id);
+            project.raw_tab_name = Some(live_name);
+        }
+        project.key.clone_from(&target_key);
+        for document in &mut project.documents {
+            document.key.project.clone_from(&target_key);
+            if reset_runtime_state {
+                document.lifecycle = DocumentLifecycle::Dormant;
+                document.load_error = None;
+            }
+        }
+        remapped_keys.insert(old_key, target_key);
+        reconciled_projects.push(project);
     }
 
-    if model.selected_project.as_ref().is_some_and(|selected| {
-        !model
-            .projects
-            .iter()
-            .any(|project| &project.key == selected)
-    }) {
-        model.selected_project = None;
-    }
+    model.projects = reconciled_projects;
+    model.selected_project =
+        selected_before.and_then(|selected| remapped_keys.get(&selected).cloned());
 }
 
 pub fn reconcile_from_source<S: ZellijStateSource>(
     model: &mut BrowserModel,
     source: &S,
+) -> Result<(), S::Error> {
+    reconcile_from_source_inner(model, source, true)
+}
+
+pub fn reconcile_from_source_preserving_runtime<S: ZellijStateSource>(
+    model: &mut BrowserModel,
+    source: &S,
+) -> Result<(), S::Error> {
+    reconcile_from_source_inner(model, source, false)
+}
+
+fn reconcile_from_source_inner<S: ZellijStateSource>(
+    model: &mut BrowserModel,
+    source: &S,
+    reset_runtime_state: bool,
 ) -> Result<(), S::Error> {
     let relevant_sessions = model
         .projects
@@ -292,6 +403,6 @@ pub fn reconcile_from_source<S: ZellijStateSource>(
         })
         .collect();
     let live = source.live_state(&relevant_sessions)?;
-    reconcile_model(model, &live);
+    reconcile_model_inner(model, &live, reset_runtime_state);
     Ok(())
 }

@@ -1,6 +1,6 @@
 use lavish_browser_core::reconcile::{
     CommandOutput, CommandRunner, LiveZellijState, ZellijCommandState, ZellijStateSource,
-    reconcile_from_source, reconcile_model,
+    reconcile_from_source, reconcile_model, reconcile_model_preserving_runtime,
 };
 use lavish_browser_core::{BrowserModel, DocumentKey, DocumentLifecycle, ProjectKey};
 use lavish_browser_protocol::ProjectMetadata;
@@ -26,6 +26,25 @@ fn zellij(session_name: &str, stable_tab_id: u32) -> ProjectKey {
 fn add(model: &mut BrowserModel, key: ProjectKey, source: &str, timestamp: u64) {
     model.open_url(
         metadata(key, source),
+        source,
+        format!("http://localhost/session/{timestamp}"),
+        timestamp,
+    );
+}
+
+fn add_with_tab_name(
+    model: &mut BrowserModel,
+    key: ProjectKey,
+    source: &str,
+    raw_tab_name: &str,
+    timestamp: u64,
+) {
+    model.open_url(
+        ProjectMetadata {
+            key,
+            label: source.into(),
+            raw_tab_name: Some(raw_tab_name.into()),
+        },
         source,
         format!("http://localhost/session/{timestamp}"),
         timestamp,
@@ -86,6 +105,107 @@ fn reconciliation_uses_exact_session_and_stable_id_and_keeps_standalone() {
             .flat_map(|project| &project.documents)
             .all(|document| document.lifecycle == DocumentLifecycle::Dormant
                 && document.load_error.is_none())
+    );
+}
+
+#[test]
+fn restored_super_tabs_ids_atomically_remap_shifted_project_and_document_keys() {
+    let mut model = BrowserModel::default();
+    add_with_tab_name(
+        &mut model,
+        zellij("main", 15),
+        "/sync",
+        r#"__super_tabs_id="st-sync" | worktree="better-syncing" | directory="psycho-pack""#,
+        1,
+    );
+    add_with_tab_name(
+        &mut model,
+        zellij("main", 16),
+        "/hiding",
+        r#"__super_tabs_id="st-hiding" | worktree="better-hiding" | directory="psycho-pack""#,
+        2,
+    );
+    add_with_tab_name(
+        &mut model,
+        zellij("main", 17),
+        "/group",
+        r#"__super_tabs_id="st-group" | worktree="group-prepare" | directory="psycho-pack""#,
+        3,
+    );
+    assert!(model.select_project(&zellij("main", 16), 4));
+
+    let mut live = LiveZellijState::default();
+    live.insert_tabs(
+        "main",
+        [
+            (
+                14,
+                r#"__super_tabs_id="st-sync" | worktree="better-syncing" | directory="psycho-pack""#.into(),
+            ),
+            (
+                15,
+                r#"__super_tabs_id="st-hiding" | worktree="better-hiding" | directory="psycho-pack""#.into(),
+            ),
+            (
+                16,
+                r#"__super_tabs_id="st-group" | worktree="group-prepare" | directory="psycho-pack""#.into(),
+            ),
+        ],
+    );
+
+    reconcile_model(&mut model, &live);
+
+    assert_eq!(
+        model
+            .projects
+            .iter()
+            .map(|project| project.key.clone())
+            .collect::<Vec<_>>(),
+        vec![zellij("main", 14), zellij("main", 15), zellij("main", 16)]
+    );
+    assert_eq!(model.selected_project, Some(zellij("main", 15)));
+    assert_eq!(
+        model
+            .projects
+            .iter()
+            .map(|project| project.label.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "psycho-pack · better-syncing",
+            "psycho-pack · better-hiding",
+            "psycho-pack · group-prepare"
+        ]
+    );
+    assert!(model.projects.iter().all(|project| {
+        project
+            .documents
+            .iter()
+            .all(|document| document.key.project == project.key)
+    }));
+}
+
+#[test]
+fn live_reconciliation_can_preserve_materialized_document_state() {
+    let raw = r#"__super_tabs_id="st-hiding" | worktree="better-hiding" | directory="psycho-pack""#;
+    let mut model = BrowserModel::default();
+    add_with_tab_name(&mut model, zellij("main", 16), "/hiding", raw, 1);
+    model.set_document_lifecycle(
+        &DocumentKey {
+            project: zellij("main", 16),
+            canonical_source_file: "/hiding".into(),
+        },
+        DocumentLifecycle::Ready,
+        None,
+    );
+    let mut live = LiveZellijState::default();
+    live.insert_tabs("main", [(15, raw.into())]);
+
+    reconcile_model_preserving_runtime(&mut model, &live);
+
+    assert_eq!(model.projects[0].key, zellij("main", 15));
+    assert_eq!(
+        model.projects[0].documents[0].lifecycle,
+        DocumentLifecycle::Ready
     );
 }
 

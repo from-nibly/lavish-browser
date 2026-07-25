@@ -8,7 +8,9 @@ use gtk::glib;
 use gtk::prelude::*;
 use lavish_browser_control::{SocketServer, default_socket_path};
 use lavish_browser_core::persistence::MetadataStore;
-use lavish_browser_core::reconcile::{ZellijCommandState, reconcile_from_source};
+use lavish_browser_core::reconcile::{
+    ZellijCommandState, reconcile_from_source, reconcile_from_source_preserving_runtime,
+};
 use lavish_browser_core::{
     BrowserModel, BrowserStateStore, DocumentKey, DocumentLifecycle, ProjectKey,
 };
@@ -324,6 +326,7 @@ impl AppController {
                 source_file,
                 url,
             } => {
+                self.reconcile_live_zellij_projects();
                 let view_actions: Vec<_> = self
                     .model
                     .borrow()
@@ -371,8 +374,14 @@ impl AppController {
                     session_name,
                     stable_tab_id,
                 };
-                let selected =
-                    self.mutate_selection(|model| model.select_project(&key, timestamp()));
+                let reconciled = self.reconcile_live_zellij_projects();
+                let selected = self.mutate_with_render(
+                    |model| model.select_project(&key, timestamp()),
+                    reconciled,
+                );
+                if reconciled && !selected {
+                    self.render();
+                }
                 response(
                     request_id,
                     if selected {
@@ -396,7 +405,11 @@ impl AppController {
                     session_name,
                     stable_tab_id,
                 };
+                let reconciled = self.reconcile_live_zellij_projects();
                 let closed = self.mutate(|model| model.close_project(&key));
+                if reconciled && !closed {
+                    self.render();
+                }
                 response(
                     request_id,
                     if closed {
@@ -420,6 +433,24 @@ impl AppController {
             ),
             Command::Ping => response(request_id, ResponseStatus::Ok, "ready", None),
         }
+    }
+
+    fn reconcile_live_zellij_projects(&self) -> bool {
+        let changed = {
+            let mut model = self.model.borrow_mut();
+            let before = model.clone();
+            if let Err(error) =
+                reconcile_from_source_preserving_runtime(&mut model, &ZellijCommandState::system())
+            {
+                eprintln!("could not reconcile live Zellij projects: {error}");
+                return false;
+            }
+            *model != before
+        };
+        if changed && let Err(error) = self.store.save(&self.model.borrow()) {
+            eprintln!("could not persist reconciled Zellij projects: {error}");
+        }
+        changed
     }
 
     fn mutate(self: &Rc<Self>, action: impl FnOnce(&mut BrowserModel) -> bool) -> bool {

@@ -23,6 +23,10 @@ pub fn project_label(raw_tab_name: &str, stable_tab_id: u32) -> String {
     }
 }
 
+pub fn super_tabs_id(input: &str) -> Option<String> {
+    decode_super_tabs_name(input)?.remove("__super_tabs_id")
+}
+
 pub fn decode_super_tabs_name(input: &str) -> Option<BTreeMap<String, String>> {
     let mut result = BTreeMap::new();
     let mut rest = input.trim();
