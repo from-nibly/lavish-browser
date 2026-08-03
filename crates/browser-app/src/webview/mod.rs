@@ -207,6 +207,7 @@ impl DocumentView {
         load_initial_url: bool,
     ) -> Rc<Self> {
         let load_tracker = Rc::new(RefCell::new(LoadTracker::default()));
+        let loaded_url = Rc::new(RefCell::new(url.to_owned()));
         webview.set_hexpand(true);
         webview.set_vexpand(true);
         webview.set_widget_name(&format!("document-webview-{identity}"));
@@ -246,13 +247,14 @@ impl DocumentView {
             let webview = webview.downgrade();
             let content = content.downgrade();
             let load_tracker = load_tracker.clone();
+            let loaded_url = loaded_url.clone();
             retry.connect_clicked(move |_| {
                 load_tracker.borrow_mut().begin_navigation();
                 if let Some(content) = content.upgrade() {
                     content.set_visible_child_name("web-content");
                 }
                 if let Some(webview) = webview.upgrade() {
-                    webview.reload();
+                    webview.load_uri(loaded_url.borrow().as_str());
                 }
             });
         }
@@ -270,13 +272,14 @@ impl DocumentView {
             let webview = webview.downgrade();
             let content = content.downgrade();
             let load_tracker = load_tracker.clone();
+            let loaded_url = loaded_url.clone();
             reload.connect_clicked(move |_| {
                 load_tracker.borrow_mut().begin_navigation();
                 if let Some(content) = content.upgrade() {
                     content.set_visible_child_name("web-content");
                 }
                 if let Some(webview) = webview.upgrade() {
-                    webview.reload();
+                    webview.load_uri(loaded_url.borrow().as_str());
                 }
             });
         }
@@ -317,7 +320,7 @@ impl DocumentView {
             root,
             webview,
             status,
-            loaded_url: Rc::new(RefCell::new(url.to_owned())),
+            loaded_url,
             load_tracker,
         });
         controller.connect_signals(&content, &failure_message, emit);
@@ -346,7 +349,7 @@ impl DocumentView {
         self.load_tracker.borrow_mut().begin_navigation();
         self.status.set_text("Reconnecting to upstream Lavish…");
         eprintln!("reloading retained Lavish document");
-        self.webview.reload();
+        self.webview.load_uri(self.loaded_url.borrow().as_str());
     }
 
     pub fn loaded_url(&self) -> String {
