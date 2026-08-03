@@ -446,7 +446,9 @@ impl DocumentView {
             let emit = emit.clone();
             let load_tracker = load_tracker.clone();
             self.webview.connect_load_failed(move |_, _, uri, error| {
-                if error.matches(webkit6::NetworkError::Cancelled) {
+                if error.matches(webkit6::NetworkError::Cancelled)
+                    || error.matches(webkit6::PolicyError::FrameLoadInterruptedByPolicyChange)
+                {
                     return true;
                 }
                 let message = format!("Could not load {uri}: {error}");
