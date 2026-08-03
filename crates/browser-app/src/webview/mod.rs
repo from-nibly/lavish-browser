@@ -446,6 +446,9 @@ impl DocumentView {
             let emit = emit.clone();
             let load_tracker = load_tracker.clone();
             self.webview.connect_load_failed(move |_, _, uri, error| {
+                if error.matches(webkit6::NetworkError::Cancelled) {
+                    return true;
+                }
                 let message = format!("Could not load {uri}: {error}");
                 eprintln!("WebKit load failed: {message}");
                 status.set_text(&format!("Reconnect required: {error}"));
