@@ -109,7 +109,7 @@ pub fn run_lavish_open(args: Vec<String>) -> Result<(), String> {
         return Ok(());
     }
     let project = resolve_project(&runner)?;
-    let client = SocketClient::new(default_socket_path());
+    let client = SocketClient::with_timeout(default_socket_path(), Duration::from_secs(30));
     ensure_browser(&client)?;
     client
         .request(&request(Command::OpenUrl {

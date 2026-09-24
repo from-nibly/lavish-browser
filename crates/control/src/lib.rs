@@ -47,9 +47,13 @@ pub struct SocketClient {
 
 impl SocketClient {
     pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self::with_timeout(path, IO_TIMEOUT)
+    }
+
+    pub fn with_timeout(path: impl Into<PathBuf>, timeout: Duration) -> Self {
         Self {
             path: path.into(),
-            timeout: IO_TIMEOUT,
+            timeout,
         }
     }
 
