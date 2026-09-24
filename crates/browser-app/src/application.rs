@@ -263,7 +263,15 @@ impl AppController {
                 .get(index as usize)
                 .map(|project| project.key.clone());
             if let Some(key) = key {
-                controller.mutate_selection(|model| model.select_project(&key, timestamp()));
+                // A dormant project requires a structural render. Defer it until GTK
+                // finishes emitting switch-page so we never destroy the active notebook.
+                let weak = Rc::downgrade(&controller);
+                glib::idle_add_local_once(move || {
+                    if let Some(controller) = weak.upgrade() {
+                        controller
+                            .mutate_selection(|model| model.select_project(&key, timestamp()));
+                    }
+                });
             }
         });
     }
@@ -736,7 +744,15 @@ impl AppController {
                     project: project_key.clone(),
                     canonical_source_file: source,
                 };
-                controller.mutate_selection(|model| model.select_document(&key, timestamp()));
+                // Selecting a dormant document can rebuild this list, so wait until
+                // GTK finishes emitting row-selected before mutating the widget tree.
+                let weak = Rc::downgrade(&controller);
+                glib::idle_add_local_once(move || {
+                    if let Some(controller) = weak.upgrade() {
+                        controller
+                            .mutate_selection(|model| model.select_document(&key, timestamp()));
+                    }
+                });
             }
         });
 
