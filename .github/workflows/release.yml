@@ -47,6 +47,7 @@ jobs:
           install -m 0755 target/release/lavish-browser "$package/bin/"
           install -m 0755 target/release/lavish-open "$package/bin/"
           install -m 0755 target/release/lavish-browser-ctl "$package/bin/"
+          install -m 0755 target/release/lavish-browser-herdr-sync "$package/bin/"
           install -m 0644 \
             target/wasm32-wasip1/release/lavish_browser_zellij.wasm \
             "$package/share/lavish-browser/zellij/lavish-browser-zellij.wasm"

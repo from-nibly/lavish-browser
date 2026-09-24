@@ -1,5 +1,7 @@
 //! Shared production launcher and lifecycle-helper behavior.
 
+pub mod herdr;
+
 use lavish_browser_control::{BrowserControl, ControlError, SocketClient, default_socket_path};
 use lavish_browser_core::labels::project_label;
 use lavish_browser_protocol::{
@@ -60,6 +62,24 @@ struct PaneInfo {
     tab_id: u32,
     #[serde(default)]
     tab_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct HerdrTabListResponse {
+    result: HerdrTabListResult,
+}
+
+#[derive(Debug, Deserialize)]
+struct HerdrTabListResult {
+    tabs: Vec<HerdrTabInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HerdrTabInfo {
+    tab_id: String,
+    workspace_id: String,
+    #[serde(default)]
+    label: String,
 }
 
 pub fn run_lavish_open(args: Vec<String>) -> Result<(), String> {
@@ -161,6 +181,20 @@ fn decode_toon_scalar(value: &str) -> Result<String, String> {
 }
 
 pub fn resolve_project(runner: &impl ProcessRunner) -> Result<ProjectMetadata, String> {
+    if std::env::var_os("HERDR_ENV").is_some() || std::env::var_os("HERDR_SESSION").is_some() {
+        let session_name = std::env::var("HERDR_SESSION")
+            .map_err(|_| "HERDR_ENV is set but HERDR_SESSION is missing".to_owned())?;
+        let workspace_id = std::env::var("HERDR_WORKSPACE_ID")
+            .map_err(|_| "HERDR_ENV is set but HERDR_WORKSPACE_ID is missing".to_owned())?;
+        let tab_id = std::env::var("HERDR_TAB_ID")
+            .map_err(|_| "HERDR_ENV is set but HERDR_TAB_ID is missing".to_owned())?;
+        let output = runner.output("herdr", &["tab", "list"].map(str::to_owned))?;
+        if !output.status.success() {
+            return Err(format!("herdr tab list exited with {}", output.status));
+        }
+        return project_from_herdr_tabs(session_name, workspace_id, tab_id, &output.stdout);
+    }
+
     let Some(session_name) = std::env::var_os("ZELLIJ_SESSION_NAME") else {
         return Ok(ProjectMetadata {
             key: ProjectKey::Standalone {
@@ -212,6 +246,36 @@ pub fn project_from_panes(
     })
 }
 
+pub fn project_from_herdr_tabs(
+    session_name: String,
+    workspace_id: String,
+    tab_id: String,
+    output: &[u8],
+) -> Result<ProjectMetadata, String> {
+    let response: HerdrTabListResponse = serde_json::from_slice(output)
+        .map_err(|error| format!("invalid HerdR tab list JSON: {error}"))?;
+    let tab = response
+        .result
+        .tabs
+        .into_iter()
+        .find(|tab| tab.tab_id == tab_id && tab.workspace_id == workspace_id)
+        .ok_or_else(|| format!("invoking HerdR tab {tab_id} was not found in {workspace_id}"))?;
+    let label = if tab.label.is_empty() {
+        tab.tab_id.clone()
+    } else {
+        tab.label.clone()
+    };
+    Ok(ProjectMetadata {
+        key: ProjectKey::Herdr {
+            session_name,
+            workspace_id,
+            tab_id: tab.tab_id,
+        },
+        label,
+        raw_tab_name: Some(tab.label),
+    })
+}
+
 pub fn run_control(args: Vec<String>) -> Result<(), String> {
     let client = SocketClient::new(default_socket_path());
     let command = match args.as_slice() {
@@ -238,8 +302,25 @@ pub fn run_control(args: Vec<String>) -> Result<(), String> {
         [name] if name == "status" || name == "ping" => {
             if name == "status" { Command::InspectState } else { Command::Ping }
         }
+        [name, session, workspace, tab]
+            if name == "select-herdr-project" || name == "close-herdr-project" =>
+        {
+            if name == "select-herdr-project" {
+                Command::SelectHerdrProject {
+                    session_name: session.clone(),
+                    workspace_id: workspace.clone(),
+                    tab_id: tab.clone(),
+                }
+            } else {
+                Command::CloseHerdrProject {
+                    session_name: session.clone(),
+                    workspace_id: workspace.clone(),
+                    tab_id: tab.clone(),
+                }
+            }
+        }
         [name, json] if name == "status" && json == "--json" => Command::InspectState,
-        _ => return Err("usage: lavish-browser-ctl <select-project|close-project> <zellij-session> <stable-tab-id>\n       lavish-browser-ctl status [--json]\n       lavish-browser-ctl ping".to_owned()),
+        _ => return Err("usage: lavish-browser-ctl <select-project|close-project> <zellij-session> <stable-tab-id>\n       lavish-browser-ctl <select-herdr-project|close-herdr-project> <herdr-session> <workspace-id> <tab-id>\n       lavish-browser-ctl status [--json]\n       lavish-browser-ctl ping".to_owned()),
     };
     match client.request(&request(command)) {
         Ok(response) => {

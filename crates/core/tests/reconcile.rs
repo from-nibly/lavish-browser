@@ -59,11 +59,21 @@ fn reconciliation_uses_exact_session_and_stable_id_and_keeps_standalone() {
     add(&mut model, zellij("main", 9), "/stale-tab", 3);
     add(
         &mut model,
+        ProjectKey::Herdr {
+            session_name: "main".into(),
+            workspace_id: "w3".into(),
+            tab_id: "w3:t1".into(),
+        },
+        "/herdr",
+        4,
+    );
+    add(
+        &mut model,
         ProjectKey::Standalone {
             label: "Standalone".into(),
         },
         "/standalone",
-        4,
+        5,
     );
     model.set_document_lifecycle(
         &DocumentKey {
@@ -87,6 +97,11 @@ fn reconciliation_uses_exact_session_and_stable_id_and_keeps_standalone() {
             .collect::<Vec<_>>(),
         vec![
             zellij("main", 4),
+            ProjectKey::Herdr {
+                session_name: "main".into(),
+                workspace_id: "w3".into(),
+                tab_id: "w3:t1".into(),
+            },
             ProjectKey::Standalone {
                 label: "Standalone".into()
             }

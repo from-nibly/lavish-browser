@@ -5,7 +5,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use thiserror::Error;
 use url::{Host, Url};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -14,6 +14,11 @@ pub enum ProjectKey {
     Zellij {
         session_name: String,
         stable_tab_id: u32,
+    },
+    Herdr {
+        session_name: String,
+        workspace_id: String,
+        tab_id: String,
     },
     Standalone {
         label: String,
@@ -60,6 +65,16 @@ pub enum Command {
     CloseProject {
         session_name: String,
         stable_tab_id: u32,
+    },
+    SelectHerdrProject {
+        session_name: String,
+        workspace_id: String,
+        tab_id: String,
+    },
+    CloseHerdrProject {
+        session_name: String,
+        workspace_id: String,
+        tab_id: String,
     },
     InspectState,
     Ping,

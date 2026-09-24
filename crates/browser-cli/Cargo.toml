@@ -18,3 +18,7 @@ path = "src/bin/lavish-open.rs"
 [[bin]]
 name = "lavish-browser-ctl"
 path = "src/bin/lavish-browser-ctl.rs"
+
+[[bin]]
+name = "lavish-browser-herdr-sync"
+path = "src/bin/lavish-browser-herdr-sync.rs"

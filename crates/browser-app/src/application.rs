@@ -438,6 +438,59 @@ impl AppController {
                     None,
                 )
             }
+            Command::SelectHerdrProject {
+                session_name,
+                workspace_id,
+                tab_id,
+            } => {
+                let key = ProjectKey::Herdr {
+                    session_name,
+                    workspace_id,
+                    tab_id,
+                };
+                let selected =
+                    self.mutate_with_render(|model| model.select_project(&key, timestamp()), false);
+                response(
+                    request_id,
+                    if selected {
+                        ResponseStatus::Ok
+                    } else {
+                        ResponseStatus::Ignored
+                    },
+                    if selected {
+                        "project selected"
+                    } else {
+                        "project not found"
+                    },
+                    None,
+                )
+            }
+            Command::CloseHerdrProject {
+                session_name,
+                workspace_id,
+                tab_id,
+            } => {
+                let key = ProjectKey::Herdr {
+                    session_name,
+                    workspace_id,
+                    tab_id,
+                };
+                let closed = self.mutate(|model| model.close_project(&key));
+                response(
+                    request_id,
+                    if closed {
+                        ResponseStatus::Ok
+                    } else {
+                        ResponseStatus::Ignored
+                    },
+                    if closed {
+                        "project closed"
+                    } else {
+                        "project not found"
+                    },
+                    None,
+                )
+            }
             Command::InspectState => response(
                 request_id,
                 ResponseStatus::Ok,
@@ -1139,6 +1192,11 @@ fn project_accessible_identity(key: &ProjectKey) -> String {
             session_name,
             stable_tab_id,
         } => format!("Zellij session {session_name}, tab {stable_tab_id}"),
+        ProjectKey::Herdr {
+            session_name,
+            workspace_id,
+            tab_id,
+        } => format!("HerdR session {session_name}, workspace {workspace_id}, tab {tab_id}"),
         ProjectKey::Standalone { label } => format!("standalone project {label}"),
     }
 }
@@ -1151,6 +1209,16 @@ fn project_identity(key: &ProjectKey) -> String {
         } => format!(
             "zellij-{}-tab-{stable_tab_id}",
             encode_identifier(session_name)
+        ),
+        ProjectKey::Herdr {
+            session_name,
+            workspace_id,
+            tab_id,
+        } => format!(
+            "herdr-{}-workspace-{}-tab-{}",
+            encode_identifier(session_name),
+            encode_identifier(workspace_id),
+            encode_identifier(tab_id)
         ),
         ProjectKey::Standalone { label } => {
             format!("standalone-{}", encode_identifier(label))

@@ -26,6 +26,41 @@ fn request_round_trips_with_version_and_id() {
 }
 
 #[test]
+fn herdr_identity_and_lifecycle_commands_round_trip() {
+    let request = RequestEnvelope::new(
+        "herdr-1",
+        Command::OpenUrl {
+            project: ProjectMetadata {
+                key: ProjectKey::Herdr {
+                    session_name: "main".into(),
+                    workspace_id: "w3".into(),
+                    tab_id: "w3:tA".into(),
+                },
+                label: "home-manager".into(),
+                raw_tab_name: Some("home-manager".into()),
+            },
+            source_file: "/tmp/review.html".into(),
+            url: "http://127.0.0.1:4387/session/herdr".into(),
+        },
+    );
+    let frame = encode_frame(&request).unwrap();
+    assert_eq!(decode_frame::<RequestEnvelope>(&frame).unwrap(), request);
+
+    let select = RequestEnvelope::new(
+        "herdr-2",
+        Command::SelectHerdrProject {
+            session_name: "main".into(),
+            workspace_id: "w3".into(),
+            tab_id: "w3:tA".into(),
+        },
+    );
+    assert_eq!(
+        decode_frame::<RequestEnvelope>(&encode_frame(&select).unwrap()).unwrap(),
+        select
+    );
+}
+
+#[test]
 fn protocol_version_is_explicit_and_rejected_when_unknown() {
     assert_eq!(validate_protocol_version(PROTOCOL_VERSION), Ok(()));
     assert_eq!(

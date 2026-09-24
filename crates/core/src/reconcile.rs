@@ -312,7 +312,9 @@ fn reconcile_model_inner(
     for mut project in std::mem::take(&mut model.projects) {
         let old_key = project.key.clone();
         let target = match &old_key {
-            ProjectKey::Standalone { .. } => Some((old_key.clone(), None)),
+            ProjectKey::Standalone { .. } | ProjectKey::Herdr { .. } => {
+                Some((old_key.clone(), None))
+            }
             ProjectKey::Zellij { session_name, .. } if live.is_unresolved(session_name) => {
                 Some((old_key.clone(), None))
             }
@@ -353,7 +355,7 @@ fn reconcile_model_inner(
         if let Some(live_name) = live_name.filter(|name| !name.is_empty()) {
             let stable_tab_id = match &target_key {
                 ProjectKey::Zellij { stable_tab_id, .. } => *stable_tab_id,
-                ProjectKey::Standalone { .. } => unreachable!(),
+                ProjectKey::Standalone { .. } | ProjectKey::Herdr { .. } => unreachable!(),
             };
             project.label = project_label(&live_name, stable_tab_id);
             project.raw_tab_name = Some(live_name);
@@ -399,7 +401,7 @@ fn reconcile_from_source_inner<S: ZellijStateSource>(
         .iter()
         .filter_map(|project| match &project.key {
             ProjectKey::Zellij { session_name, .. } => Some(session_name.clone()),
-            ProjectKey::Standalone { .. } => None,
+            ProjectKey::Standalone { .. } | ProjectKey::Herdr { .. } => None,
         })
         .collect();
     let live = source.live_state(&relevant_sessions)?;

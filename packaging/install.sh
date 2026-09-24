@@ -48,6 +48,7 @@ install -d "$stage/bin" "$stage/share/applications" "$stage/share/icons/hicolor/
 install -m 0755 "$native_dir/lavish-browser" "$stage/bin/lavish-browser"
 install -m 0755 "$native_dir/lavish-open" "$stage/bin/lavish-open"
 install -m 0755 "$native_dir/lavish-browser-ctl" "$stage/bin/lavish-browser-ctl"
+install -m 0755 "$native_dir/lavish-browser-herdr-sync" "$stage/bin/lavish-browser-herdr-sync"
 install -m 0644 "$wasm_dir/lavish_browser_zellij.wasm" \
   "$stage/share/lavish-browser/zellij/lavish-browser-zellij.wasm"
 install -m 0644 "$root/assets/works.from-nibly.LavishBrowser.desktop" "$stage/share/applications/"
@@ -55,4 +56,5 @@ install -m 0644 "$root/assets/works.from-nibly.LavishBrowser.svg" \
   "$stage/share/icons/hicolor/scalable/apps/works.from-nibly.LavishBrowser.svg"
 
 printf 'Installed Lavish Browser under %s\n' "$stage"
+printf 'HerdR lifecycle helper: %s/bin/lavish-browser-herdr-sync\n' "$prefix"
 printf 'Optional Zellij plugin: %s/share/lavish-browser/zellij/lavish-browser-zellij.wasm\n' "$prefix"

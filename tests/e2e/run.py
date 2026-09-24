@@ -89,7 +89,7 @@ def terminal_launcher(
 
 def browser_request(runtime: Path, command: dict) -> dict:
     request = {
-        "protocol_version": 1,
+        "protocol_version": 2,
         "request_id": f"e2e-{time.monotonic_ns()}",
         "command": command,
     }

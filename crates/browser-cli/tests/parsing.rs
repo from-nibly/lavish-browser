@@ -1,5 +1,6 @@
 use lavish_browser_cli::{
-    LavishSession, parse_lavish_toon, project_from_panes, upstream_arguments,
+    LavishSession, parse_lavish_toon, project_from_herdr_tabs, project_from_panes,
+    upstream_arguments,
 };
 use lavish_browser_protocol::ProjectKey;
 
@@ -54,4 +55,26 @@ fn maps_the_invoking_pane_instead_of_the_active_tab() {
         }
     );
     assert_eq!(project.label, "api · feature");
+}
+
+#[test]
+fn maps_the_invoking_herdr_tab_by_stable_string_identity() {
+    let tabs = br#"{
+      "id":"cli:tab:list",
+      "result":{"tabs":[
+        {"workspace_id":"w2","tab_id":"w2:t1","label":"wrong"},
+        {"workspace_id":"w3","tab_id":"w3:tA","label":"home-manager"}
+      ]}
+    }"#;
+    let project =
+        project_from_herdr_tabs("main".into(), "w3".into(), "w3:tA".into(), tabs).unwrap();
+    assert_eq!(
+        project.key,
+        ProjectKey::Herdr {
+            session_name: "main".into(),
+            workspace_id: "w3".into(),
+            tab_id: "w3:tA".into(),
+        }
+    );
+    assert_eq!(project.label, "home-manager");
 }

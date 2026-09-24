@@ -71,6 +71,11 @@ fn launcher_forwards_bytes_preserves_args_and_routes_standalone() {
         )
         .env("ARGS_LOG", &args_log)
         .env("LAVISH_BROWSER_SOCKET", &socket)
+        .env_remove("HERDR_ENV")
+        .env_remove("HERDR_SESSION")
+        .env_remove("HERDR_WORKSPACE_ID")
+        .env_remove("HERDR_TAB_ID")
+        .env_remove("HERDR_SOCKET_PATH")
         .env_remove("ZELLIJ_SESSION_NAME")
         .env_remove("ZELLIJ_PANE_ID")
         .output()
@@ -136,6 +141,11 @@ fn user_ended_and_upstream_failure_never_contact_or_start_browser() {
             )
             .env("LAVISH_BROWSER_EXECUTABLE", dir.join("lavish-browser"))
             .env("LAVISH_BROWSER_SOCKET", dir.join("absent.sock"))
+            .env_remove("HERDR_ENV")
+            .env_remove("HERDR_SESSION")
+            .env_remove("HERDR_WORKSPACE_ID")
+            .env_remove("HERDR_TAB_ID")
+            .env_remove("HERDR_SOCKET_PATH")
             .env_remove("ZELLIJ_SESSION_NAME")
             .output()
             .unwrap();
@@ -162,7 +172,7 @@ s=socket.socket(socket.AF_UNIX); s.bind(p); os.chmod(p,0o600); s.listen()
 for _ in range(2):
  c,_=s.accept(); data=b''
  while not data.endswith(b'\n'): data += c.recv(4096)
- r=json.loads(data); c.sendall((json.dumps({'protocol_version':1,'request_id':r['request_id'],'status':'ok'})+'\n').encode()); c.close()
+ r=json.loads(data); c.sendall((json.dumps({'protocol_version':2,'request_id':r['request_id'],'status':'ok'})+'\n').encode()); c.close()
 "#;
     executable(
         &dir.join("fake-browser"),
@@ -184,6 +194,11 @@ for _ in range(2):
         )
         .env("LAVISH_BROWSER_EXECUTABLE", dir.join("fake-browser"))
         .env("LAVISH_BROWSER_SOCKET", &socket)
+        .env_remove("HERDR_ENV")
+        .env_remove("HERDR_SESSION")
+        .env_remove("HERDR_WORKSPACE_ID")
+        .env_remove("HERDR_TAB_ID")
+        .env_remove("HERDR_SOCKET_PATH")
         .env_remove("ZELLIJ_SESSION_NAME")
         .output()
         .unwrap();
