@@ -131,17 +131,19 @@ fn browser_client() -> SocketClient {
 }
 
 fn synchronize(options: &SyncOptions, browser: &SocketClient) -> Result<(), String> {
+    // Subscribe first so a rename during the initial snapshot cannot be missed.
+    let mut reader = subscribe(&options.socket_path)?;
     let snapshot = request_snapshot(&options.socket_path)?;
     let mut tabs = tab_map(&snapshot);
+    synchronize_labels(browser, &options.session_name, &snapshot)?;
     select_focused(browser, &options.session_name, &snapshot)?;
-
-    let mut reader = subscribe(&options.socket_path)?;
     loop {
         let event: HerdrEvent = read_json_line(&mut reader)?;
         match event.event.as_str() {
             "workspace_focused" | "tab_focused" => {
                 let snapshot = request_snapshot(&options.socket_path)?;
                 tabs = tab_map(&snapshot);
+                synchronize_labels(browser, &options.session_name, &snapshot)?;
                 select_focused(browser, &options.session_name, &snapshot)?;
             }
             "tab_created" => {
@@ -184,7 +186,11 @@ fn synchronize(options: &SyncOptions, browser: &SocketClient) -> Result<(), Stri
                     }
                 }
             }
-            "tab_renamed" => {}
+            "tab_renamed" => {
+                let snapshot = request_snapshot(&options.socket_path)?;
+                tabs = tab_map(&snapshot);
+                synchronize_labels(browser, &options.session_name, &snapshot)?;
+            }
             _ => {}
         }
     }
@@ -192,7 +198,27 @@ fn synchronize(options: &SyncOptions, browser: &SocketClient) -> Result<(), Stri
 
 fn synchronize_once(options: &SyncOptions, browser: &SocketClient) -> Result<(), String> {
     let snapshot = request_snapshot(&options.socket_path)?;
+    synchronize_labels(browser, &options.session_name, &snapshot)?;
     select_focused(browser, &options.session_name, &snapshot)
+}
+
+fn synchronize_labels(
+    browser: &SocketClient,
+    session_name: &str,
+    snapshot: &HerdrSnapshot,
+) -> Result<(), String> {
+    for tab in &snapshot.tabs {
+        dispatch_browser(
+            browser,
+            Command::RenameHerdrProject {
+                session_name: session_name.to_owned(),
+                workspace_id: tab.workspace_id.clone(),
+                tab_id: tab.tab_id.clone(),
+                name: tab.label.clone(),
+            },
+        )?;
+    }
+    Ok(())
 }
 
 fn request_snapshot(path: &Path) -> Result<HerdrSnapshot, String> {

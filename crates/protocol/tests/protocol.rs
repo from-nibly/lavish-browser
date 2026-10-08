@@ -46,6 +46,20 @@ fn herdr_identity_and_lifecycle_commands_round_trip() {
     let frame = encode_frame(&request).unwrap();
     assert_eq!(decode_frame::<RequestEnvelope>(&frame).unwrap(), request);
 
+    let rename = RequestEnvelope::new(
+        "herdr-rename",
+        Command::RenameHerdrProject {
+            session_name: "main".into(),
+            workspace_id: "w3".into(),
+            tab_id: "w3:tA".into(),
+            name: "Review <日本語>".into(),
+        },
+    );
+    assert_eq!(
+        decode_frame::<RequestEnvelope>(&encode_frame(&rename).unwrap()).unwrap(),
+        rename
+    );
+
     let select = RequestEnvelope::new(
         "herdr-2",
         Command::SelectHerdrProject {

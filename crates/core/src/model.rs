@@ -142,6 +142,19 @@ impl BrowserModel {
         true
     }
 
+    /// Update display metadata without touching identity, selection, or LRU state.
+    pub fn rename_project(&mut self, key: &ProjectKey, label: String, raw_name: String) -> bool {
+        let Some(project) = self.projects.iter_mut().find(|project| &project.key == key) else {
+            return false;
+        };
+        if project.label == label && project.raw_tab_name.as_deref() == Some(&raw_name) {
+            return false;
+        }
+        project.label = label;
+        project.raw_tab_name = Some(raw_name);
+        true
+    }
+
     pub fn close_project(&mut self, key: &ProjectKey) -> bool {
         let Some(index) = self.projects.iter().position(|project| &project.key == key) else {
             return false;

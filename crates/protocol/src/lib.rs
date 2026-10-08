@@ -71,6 +71,12 @@ pub enum Command {
         workspace_id: String,
         tab_id: String,
     },
+    RenameHerdrProject {
+        session_name: String,
+        workspace_id: String,
+        tab_id: String,
+        name: String,
+    },
     CloseHerdrProject {
         session_name: String,
         workspace_id: String,

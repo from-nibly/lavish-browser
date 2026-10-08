@@ -473,6 +473,38 @@ impl AppController {
                     None,
                 )
             }
+            Command::RenameHerdrProject {
+                session_name,
+                workspace_id,
+                tab_id,
+                name,
+            } => {
+                let label = if name.is_empty() {
+                    tab_id.clone()
+                } else {
+                    name.clone()
+                };
+                let key = ProjectKey::Herdr {
+                    session_name,
+                    workspace_id,
+                    tab_id,
+                };
+                let changed = self.mutate(|model| model.rename_project(&key, label, name));
+                response(
+                    request_id,
+                    if changed {
+                        ResponseStatus::Ok
+                    } else {
+                        ResponseStatus::Ignored
+                    },
+                    if changed {
+                        "project renamed"
+                    } else {
+                        "project unchanged or not found"
+                    },
+                    None,
+                )
+            }
             Command::CloseHerdrProject {
                 session_name,
                 workspace_id,
